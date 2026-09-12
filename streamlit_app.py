@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import html
 import json
+import os
 import re
 import sys
 from datetime import date, datetime, timedelta
@@ -13,6 +14,15 @@ import streamlit as st
 CODE_DIR = Path(__file__).resolve().parent
 if str(CODE_DIR) not in sys.path:
     sys.path.insert(0, str(CODE_DIR))
+
+# Em hosts como o Streamlit Community Cloud, segredos ficam só em st.secrets,
+# não em variáveis de ambiente — repassa para os.environ para o datajud_client usar.
+if "DATAJUD_API_KEY" not in os.environ:
+    try:
+        if "DATAJUD_API_KEY" in st.secrets:
+            os.environ["DATAJUD_API_KEY"] = st.secrets["DATAJUD_API_KEY"]
+    except Exception:
+        pass
 
 from comunica_client import ComunicaClient, ComunicaError  # noqa: E402
 from datajud_client import DataJudClient, DataJudError, NumeroProcessoCNJ  # noqa: E402
