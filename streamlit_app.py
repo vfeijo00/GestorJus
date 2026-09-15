@@ -6,9 +6,13 @@ import json
 import os
 import re
 import sys
+import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
+from email.mime.text import MIMEText
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 CODE_DIR = Path(__file__).resolve().parent
@@ -23,6 +27,16 @@ if "DATAJUD_API_KEY" not in os.environ:
             os.environ["DATAJUD_API_KEY"] = st.secrets["DATAJUD_API_KEY"]
     except Exception:
         pass
+
+# Credenciais OAuth do app Google (Client ID/Secret), cadastradas uma única vez pelo
+# desenvolvedor via variável de ambiente ou st.secrets — nunca digitadas na interface.
+for _google_env_var in ("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET"):
+    if _google_env_var not in os.environ:
+        try:
+            if _google_env_var in st.secrets:
+                os.environ[_google_env_var] = st.secrets[_google_env_var]
+        except Exception:
+            pass
 
 from comunica_client import ComunicaClient, ComunicaError  # noqa: E402
 from datajud_client import DataJudClient, DataJudError, NumeroProcessoCNJ  # noqa: E402
@@ -120,6 +134,76 @@ st.markdown(
     div[class*="st-key-sidebar_brand"] [data-testid="stVerticalBlock"],
     div[class*="st-key-sidebar_brand"] [data-testid="stElementContainer"] { height:auto !important; min-height:56px; }
     .brand-logo-icon { width:60px; height:40px; min-width:60px; object-fit:contain; background:none; }
+
+    /* Fixed, scrollable notifications-style alerts card, top-right of the screen.
+       Always position:fixed (never part of document flow) so it overlays the page
+       instead of shifting the panel's layout, at any viewport width. Discreet: same
+       tone as the page background, no border, square corners, like a dropdown menu. */
+    /* Streamlit wraps each of these in a "stLayoutWrapper" div that stays in normal flow
+       (0 height, but still a flex item) — its parent's flex `gap` still reserves space for
+       it, which pushed the page content down when the balloon appeared. display:contents
+       removes that wrapper from layout entirely so only our position:fixed boxes remain. */
+    [data-testid="stLayoutWrapper"]:has(> [class*="st-key-alerts_bell_button"]),
+    [data-testid="stLayoutWrapper"]:has(> [class*="st-key-global_alerts_panel"]) {
+        display:contents !important;
+    }
+    /* Bell button: standalone, always visible, fixed top-right — independent of the balloon */
+    div[class*="st-key-alerts_bell_button"] {
+        position:fixed !important; top:1.3rem; right:2rem; z-index:80; width:auto !important;
+    }
+    div[class*="st-key-alerts_bell_button"] button {
+        width:36px; height:36px; padding:0; display:flex; align-items:center; justify-content:center;
+        border-radius:50%; border:none; background:var(--surface); box-shadow:var(--shadow-md);
+    }
+    div[class*="st-key-alerts_bell_button"] button:hover { background:var(--mint); }
+    div[class*="st-key-alerts_bell_button"] button span[data-testid="stIconMaterial"] { color:var(--ink) !important; font-size:18px !important; }
+    /* Balloon: only rendered while expanded, floats just below the bell */
+    div[class*="st-key-global_alerts_panel"] {
+        position:fixed !important; top:3.6rem; right:2rem; width:360px;
+        z-index:70; background:var(--paper); border:none; border-radius:0; box-shadow:var(--shadow-md); padding:0;
+    }
+    /* Fixed max-height with internal scroll so lower links stay reachable */
+    div[class*="st-key-alerts_panel_body"] {
+        padding:.5rem 0 .3rem; max-height:380px; overflow-y:auto;
+    }
+    @keyframes alertItemFadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
+    .alert-section-title, .alert-item {
+        opacity:0; animation:alertItemFadeIn .3s ease forwards;
+    }
+    .alert-section-title {
+        color:var(--faint); font:700 10px 'DM Mono'; letter-spacing:1px; text-transform:uppercase;
+        padding:.6rem 1.1rem .3rem;
+    }
+    .alert-item {
+        display:flex; align-items:baseline; gap:.55rem; padding:.4rem 1.1rem .4rem 1.5rem;
+        color:var(--ink); font:13.5px/1.5 Manrope; position:relative;
+    }
+    .alert-item::before {
+        content:""; position:absolute; left:1.15rem; top:.75rem; width:7px; height:7px;
+    }
+    .alert-item.vencido::before { background:var(--coral); }
+    .alert-item.vencendo::before { background:var(--yellow); }
+    div[class*="st-key-alerts_panel_footer"] {
+        padding:.75rem 1.1rem .85rem; border-top:1px solid var(--line);
+    }
+    /* "Solicitar novo link" button: discreet, negative/outline scheme using the palette accent */
+    div[class*="st-key-alerts_panel_footer"] button {
+        background:transparent !important; border:1px solid var(--teal) !important; border-radius:0 !important;
+        color:var(--teal-dark) !important; box-shadow:none !important; font-weight:700;
+    }
+    div[class*="st-key-alerts_panel_footer"] button p { color:inherit !important; }
+    div[class*="st-key-alerts_panel_footer"] button:hover:not(:disabled) {
+        background:var(--teal) !important; color:#fff !important; transform:none;
+    }
+    div[class*="st-key-alerts_panel_footer"] button:disabled { opacity:.45; }
+
+    /* Compact send-options row below each (collapsed) process card in "Solicitar novo link" */
+    div[class*="st-key-solicitar_send_options_"] { margin:-.4rem 0 .5rem; }
+    div[class*="st-key-solicitar_send_options_"] [data-testid="stHorizontalBlock"] { gap:.3rem !important; }
+    div[class*="st-key-solicitar_send_options_"] a[data-testid^="stBaseLinkButton"] {
+        min-height:0 !important; height:22px !important; padding:0 .35rem !important;
+    }
+    div[class*="st-key-solicitar_send_options_"] a[data-testid^="stBaseLinkButton"] p { font-size:10px !important; margin:0 !important; }
 
     /* Profile "carteirinha" card + logout on the Home screen */
     div[class*="st-key-home_profile_panel"] {
@@ -263,14 +347,6 @@ st.markdown(
     div[class*="st-key-sei_link_"] a[data-testid="stBaseLinkButton"]:hover { background:var(--mint); }
     div[class*="st-key-sei_link_"] a[data-testid="stBaseLinkButton"] span[data-testid="stIconMaterial"] { color:var(--ink) !important; font-size:18px !important; }
 
-    /* "leve-me até lá" link-style button inside movement dialogs */
-    div[class*="st-key-mov_dialog_goto_wrap"] { margin-top:.6rem; }
-    div[class*="st-key-mov_dialog_goto"] button {
-        background:transparent; border:none; box-shadow:none; padding:0;
-        color:var(--teal-dark) !important; font-weight:700; justify-content:flex-end;
-    }
-    div[class*="st-key-mov_dialog_goto"] button:hover { text-decoration:underline; }
-    div[class*="st-key-mov_dialog_goto"] button p { text-align:right !important; }
 
     /* Small toolbar buttons (filter / add / delete): compact, flat, no border, top-left above table */
     div[class*="_toolbar"][data-testid="stVerticalBlock"] {
@@ -418,7 +494,7 @@ def show_processes_dialog() -> None:
     else:
         st.dataframe(
             [
-                {"Nome de referência": item["label"], "Número CNJ": item["number"]}
+                {"Interessado": item["label"], "Número CNJ": item["number"]}
                 for item in st.session_state.processes
             ],
             use_container_width=True,
@@ -433,7 +509,7 @@ def show_cnpjs_dialog() -> None:
     else:
         st.dataframe(
             [
-                {"Nome da empresa / Razão Social": item["label"], "CNPJ": format_cnpj_br(item["cnpj"])}
+                {"Razão Social": item["label"], "CNPJ": format_cnpj_br(item["cnpj"])}
                 for item in st.session_state.monitored_cnpjs
             ],
             use_container_width=True,
@@ -448,6 +524,28 @@ def find_credencial_for_processo(numero: str):
     return None
 
 
+def ultima_consulta_label(momento: datetime | None) -> str:
+    if not momento:
+        return "Nunca consultado"
+    dias = (datetime.now() - momento).days
+    if dias <= 0:
+        return "Hoje"
+    return f"Há {dias} dia(s)"
+
+
+def _ultima_consulta_row_style(row: pd.Series) -> list[str]:
+    label = row.get("Última consulta") or ""
+    color = ""
+    if label == "Hoje":
+        color = "background-color:#e5f2ec"
+    else:
+        match = re.match(r"Há (\d+) dia\(s\)", label)
+        if match:
+            dias = int(match.group(1))
+            color = "background-color:#fdf6e3" if dias <= 5 else "background-color:#fbe4de"
+    return [color if col == "Última consulta" else "" for col in row.index]
+
+
 def credencial_status(validade):
     if not validade:
         return ("Sem prazo de validade informado", "neutral")
@@ -459,6 +557,21 @@ def credencial_status(validade):
     return (f"Válido até {validade.strftime('%d/%m/%Y')}", "ok")
 
 
+def credencial_link_label(item: dict) -> str:
+    nome = (item.get("nome") or "").strip()
+    if nome:
+        label = nome
+    else:
+        link = item.get("link") or ""
+        label = link if len(link) <= 60 else f"{link[:57]}..."
+    validade = item.get("validade")
+    return f"{label} (até {validade.strftime('%d/%m/%Y')})" if validade else label
+
+
+def credenciais_com_link_do_orgao(org: str) -> list[dict]:
+    return [c for c in st.session_state.credenciais if c["org"] == org and c.get("link")]
+
+
 SEI_LINK_STATUS_CATEGORIES = ["Ativo", "Em vencimento", "Vencido"]
 
 
@@ -467,27 +580,651 @@ def sei_link_status(proc) -> tuple[str, str | None]:
 
     Categoria é uma de SEI_LINK_STATUS_CATEGORIES, ou None quando não se aplica
     (consulta pública ou link não cadastrado)."""
-    if proc.get("forma_acesso") != "Link de acesso":
+    if proc.get("forma_acesso") != "Restrito":
         return "Consulta pública", None
     credencial = find_credencial_for_processo(proc["number"])
-    if not credencial or not credencial.get("link"):
-        return "Link não cadastrado", None
-    validade = credencial.get("validade")
-    if not validade:
+    if credencial and credencial.get("link"):
+        validade = credencial.get("validade")
+        if not validade:
+            return "Ativo (sem prazo informado)", "Ativo"
+        dias = (validade - date.today()).days
+        if dias < 0:
+            return f"Vencido há {abs(dias)} dia(s)", "Vencido"
+        if dias <= 10:
+            return f"Vence em {dias} dia(s)", "Em vencimento"
+        return f"Válido até {validade.strftime('%d/%m/%Y')}", "Ativo"
+    if proc.get("link"):
         return "Ativo (sem prazo informado)", "Ativo"
+    return "Link não cadastrado", None
+
+
+def sei_consultar_link(proc: dict) -> str | None:
+    """Retorna o link a abrir para consultar o processo: o link de acesso cadastrado
+    diretamente no processo, o link da credencial vinculada, ou o portal de consulta
+    pública do órgão quando a forma de acesso for consulta pública."""
+    if proc.get("link"):
+        return proc["link"]
+    if proc.get("forma_acesso") == "Consulta pública":
+        return SEI_CONSULTA_PUBLICA_URLS.get(proc["org"])
+    return (find_credencial_for_processo(proc["number"]) or {}).get("link")
+
+
+def credencial_alert_category(item: dict) -> str | None:
+    """Retorna 'Vencido', 'Em vencimento' (≤10 dias) ou None para uma credencial/link."""
+    validade = item.get("validade")
+    if not validade:
+        return None
     dias = (validade - date.today()).days
     if dias < 0:
-        return f"Vencido há {abs(dias)} dia(s)", "Vencido"
+        return "Vencido"
     if dias <= 10:
-        return f"Vence em {dias} dia(s)", "Em vencimento"
-    return f"Válido até {validade.strftime('%d/%m/%Y')}", "Ativo"
+        return "Em vencimento"
+    return None
+
+
+def collect_link_alerts() -> list[dict]:
+    alerts = []
+    for idx, item in enumerate(st.session_state.credenciais):
+        categoria = credencial_alert_category(item)
+        if categoria:
+            alerts.append({"index": idx, "item": item, "categoria": categoria, "dias": (item["validade"] - date.today()).days})
+    return alerts
+
+
+def _prazo_text(alert: dict) -> str:
+    dias = alert["dias"]
+    return f"vencido há {abs(dias)} dia(s)" if dias < 0 else f"vence em {dias} dia(s)"
+
+
+def render_email_template(alerts: list[dict]) -> tuple[str, str]:
+    """Renderiza o e-mail padrão para um único processo/link (um alerta)."""
+    profile = st.session_state.firm_profile
+    template = st.session_state.email_template
+    primary = alerts[0]["item"] if alerts else {}
+    context = {
+        "usuario": profile.get("usuario") or "",
+        "escritorio": profile.get("nome") or "",
+        "processo": primary.get("processo") or "Geral",
+        "orgao": primary.get("org") or "",
+        "link": primary.get("link") or "",
+        "validade": primary["validade"].strftime("%d/%m/%Y") if primary.get("validade") else "",
+        "status": _prazo_text(alerts[0]) if alerts else "",
+    }
+
+    def _fill(text: str) -> str:
+        for key, value in context.items():
+            text = text.replace("{" + key + "}", value)
+        return text
+
+    return _fill(template["assunto"]), _fill(template["corpo"])
+
+
+def collect_alert_recipients(alerts: list[dict]) -> list[str]:
+    recipients: list[str] = []
+    for alert in alerts:
+        for email in alert["item"].get("emails") or []:
+            email = email.strip()
+            if email and email not in recipients:
+                recipients.append(email)
+    return recipients
+
+
+GMAIL_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.readonly",  # leitura dos e-mails de push do TCU
+]
+GMAIL_DOMAINS = {"gmail.com", "googlemail.com"}
+
+
+def is_gmail_address(email: str | None) -> bool:
+    if not email or "@" not in email:
+        return False
+    return email.strip().lower().rsplit("@", 1)[-1] in GMAIL_DOMAINS
+
+
+def _google_oauth_client_config() -> dict | None:
+    client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+    client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
+    if not client_id or not client_secret:
+        return None
+    return {
+        "installed": {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": ["http://localhost"],
+        }
+    }
+
+
+def conectar_conta_google() -> tuple[bool, str]:
+    """Abre o navegador para o login/consentimento do Google e guarda as credenciais na sessão."""
+    client_config = _google_oauth_client_config()
+    if not client_config:
+        return False, "Informe o Client ID e o Client Secret do Google Cloud antes de conectar."
+    try:
+        from google_auth_oauthlib.flow import InstalledAppFlow
+    except ImportError:
+        return False, "Bibliotecas do Google não instaladas. Rode: pip install -r requirements.txt"
+    try:
+        flow = InstalledAppFlow.from_client_config(client_config, scopes=GMAIL_SCOPES)
+        creds = flow.run_local_server(port=0)
+    except Exception as exc:
+        return False, f"Falha na autenticação com o Google: {exc}"
+    st.session_state.email_sender_config["oauth_account"] = creds.to_json()
+    return True, "Conta Google conectada."
+
+
+def desconectar_conta_google() -> None:
+    st.session_state.email_sender_config["oauth_account"] = None
+
+
+def _enviar_email_oauth_google(remetente: str, destinatarios: list[str], assunto: str, corpo: str) -> tuple[bool, str]:
+    token_json = st.session_state.email_sender_config.get("oauth_account")
+    if not token_json:
+        return False, "Conecte sua conta Google na página E-mails antes de enviar."
+    if not destinatarios:
+        return False, "Nenhum destinatário informado."
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+    except ImportError:
+        return False, "Bibliotecas do Google não instaladas. Rode: pip install -r requirements.txt"
+
+    creds = Credentials.from_authorized_user_info(json.loads(token_json), GMAIL_SCOPES)
+    try:
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            st.session_state.email_sender_config["oauth_account"] = creds.to_json()
+
+        msg = MIMEText(corpo, "plain", "utf-8")
+        msg["Subject"] = assunto
+        msg["From"] = remetente
+        msg["To"] = ", ".join(destinatarios)
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
+
+        service = build("gmail", "v1", credentials=creds)
+        service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        return True, f"E-mail enviado para {len(destinatarios)} destinatário(s)."
+    except Exception as exc:
+        return False, f"Falha ao enviar e-mail: {exc}"
+
+
+def email_sender_ready() -> bool:
+    """Indica se dá para enviar automaticamente agora (só para remetentes do Gmail, conectados)."""
+    remetente = st.session_state.firm_profile.get("email", "")
+    if not is_gmail_address(remetente):
+        return False
+    return bool(st.session_state.email_sender_config.get("oauth_account"))
+
+
+def enviar_email(destinatarios: list[str], assunto: str, corpo: str) -> tuple[bool, str]:
+    """Ponto único de envio automático — usa a conta Google conectada (só remetentes @gmail.com)."""
+    remetente = st.session_state.firm_profile.get("email", "")
+    return _enviar_email_oauth_google(remetente, destinatarios, assunto, corpo)
+
+
+def gmail_compose_url(destinatarios: list[str], assunto: str, corpo: str) -> str:
+    params = {"view": "cm", "fs": "1", "to": ", ".join(destinatarios), "su": assunto, "body": corpo}
+    return "https://mail.google.com/mail/?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+
+
+def outlook_compose_url(destinatarios: list[str], assunto: str, corpo: str) -> str:
+    params = {"to": ";".join(destinatarios), "subject": assunto, "body": corpo}
+    return "https://outlook.office.com/mail/deeplink/compose?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+
+
+def mailto_compose_url(destinatarios: list[str], assunto: str, corpo: str) -> str:
+    """Abre o cliente de e-mail padrão do sistema (ex.: Outlook instalado)."""
+    to = urllib.parse.quote(",".join(destinatarios))
+    query = urllib.parse.urlencode({"subject": assunto, "body": corpo}, quote_via=urllib.parse.quote)
+    return f"mailto:{to}?{query}"
+
+
+def google_account_connected() -> bool:
+    return bool(st.session_state.email_sender_config.get("oauth_account"))
+
+
+TCU_PROCESSO_REGEX = re.compile(r"^\s*(\d{3})\.?(\d{3})/(\d{4})-(\d)\s*$")
+TCU_PUSH_ASSUNTO_REGEX = re.compile(r"\[TCU\]\s*Acompanhamento Processual\s*-\s*Processo\s*(.+)", re.IGNORECASE)
+TCU_PUSH_CADASTRO_URL = (
+    "https://contas.tcu.gov.br/jurisSessoes/Web/Juris/ConsultaProcessoPush/ConsultarProcessoPush.faces"
+)
+
+
+def normalizar_numero_tcu(numero: str) -> str:
+    """Valida e normaliza um número de processo TCU (formato NNN.NNN/AAAA-D)."""
+    match = TCU_PROCESSO_REGEX.match(numero or "")
+    if not match:
+        raise ValueError("Número de processo TCU inválido. Use o formato NNN.NNN/AAAA-D (ex.: 012.345/2024-3).")
+    p1, p2, ano, dv = match.groups()
+    return f"{p1}.{p2}/{ano}-{dv}"
+
+
+def tcu_numero_digits(numero: str) -> str:
+    return re.sub(r"\D", "", numero or "")
+
+
+def tcu_pesquisa_publica_url(numero: str) -> str:
+    """Página de documentos do processo na busca pública do TCU, já aberta no processo certo.
+
+    Formato confirmado a partir de uma URL real capturada pelo usuário ao navegar até um
+    processo específico em pesquisa.apps.tcu.gov.br. O número do processo vai com a barra
+    escapada (%2F) e depois o trecho inteiro é escapado de novo (por isso o %25 duplicado),
+    como um segmento de rota do Angular; os demais segmentos (filtro em branco e ordenação)
+    são fixos, iguais aos que o próprio site usa por padrão. Não exige login nem credencial.
+    """
+    numero_barra_escapada = urllib.parse.quote(numero, safe="")
+    numero_duplo_escapado = urllib.parse.quote(numero_barra_escapada, safe="")
+    return (
+        "https://pesquisa.apps.tcu.gov.br/documento/processo/"
+        f"{numero_duplo_escapado}/%2520/"
+        "DTAUTUACAOORDENACAO%2520desc%252C%2520NUMEROCOMZEROS%2520desc/0"
+    )
+
+
+def tcu_conecta_url(numero: str) -> str:
+    """Página do processo no Conecta TCU (histórico completo), já aberta no processo certo.
+
+    Formato confirmado pelo usuário: digitando o número na busca da página inicial do
+    usuário credenciado, o Conecta TCU redireciona para /tvp-por-numero/{número só dígitos}.
+    Diferente da busca pública, essa página exige estar logado no Conecta TCU (xCPF/senha) —
+    sem sessão ativa, o TCU redireciona primeiro para a tela de login antes de mostrar o processo.
+    """
+    return f"https://conecta-tcu.apps.tcu.gov.br/tvp-por-numero/{tcu_numero_digits(numero)}"
+
+
+def parse_tcu_push_email(assunto: str, corpo: str) -> dict | None:
+    """Extrai os dados estruturados do e-mail de 'Acompanhamento processual (Push)' do TCU.
+
+    Retorna None quando o e-mail não bate com o formato esperado, em vez de levantar erro —
+    a sincronização deve ignorar e-mails inesperados, não quebrar por causa deles.
+    """
+    assunto_match = TCU_PUSH_ASSUNTO_REGEX.search(assunto or "")
+    if not assunto_match:
+        return None
+
+    def _campo(rotulo: str) -> str:
+        # Ancorado no início da linha: o texto de introdução do e-mail também usa a palavra
+        # "movimentação" numa frase solta, então sem isso o regex pegaria a frase errada.
+        campo_match = re.search(rf"^{rotulo}\s*:\s*(.+)$", corpo or "", re.IGNORECASE | re.MULTILINE)
+        return campo_match.group(1).strip() if campo_match else ""
+
+    numero_processo = _campo(r"Processo") or assunto_match.group(1).strip()
+    numero_processo = re.sub(r"^TC\s*", "", numero_processo, flags=re.IGNORECASE).strip()
+    movimentacao = _campo(r"Movimenta[cç][aã]o")
+    if not numero_processo or not movimentacao:
+        return None
+
+    data_match = re.search(
+        r"^Data do evento\s*:\s*(\d{2}/\d{2}/\d{4})\s*(?:às|as)\s*(\d{2}:\d{2})",
+        corpo or "", re.IGNORECASE | re.MULTILINE,
+    )
+    data_evento = None
+    if data_match:
+        try:
+            data_evento = datetime.strptime(f"{data_match.group(1)} {data_match.group(2)}", "%d/%m/%Y %H:%M").date()
+        except ValueError:
+            data_evento = None
+
+    return {
+        "numero_processo": numero_processo,
+        "relator": _campo(r"Redator/Relator"),
+        "interessados": _campo(r"Interessado\(s\)/Respons[aá]vel\(is\)"),
+        "data_evento": data_evento,
+        "descricao": movimentacao,
+    }
+
+
+def _extrair_assunto_corpo_gmail(mensagem_gmail: dict) -> tuple[str, str]:
+    payload = mensagem_gmail.get("payload", {})
+    headers = payload.get("headers", [])
+    assunto = next((h["value"] for h in headers if h.get("name", "").lower() == "subject"), "")
+
+    def _achar_texto_plano(part: dict) -> str | None:
+        body_data = part.get("body", {}).get("data")
+        if part.get("mimeType") == "text/plain" and body_data:
+            padded = body_data + "=" * (-len(body_data) % 4)
+            return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
+        for sub_part in part.get("parts", []) or []:
+            texto = _achar_texto_plano(sub_part)
+            if texto:
+                return texto
+        return None
+
+    return assunto, _achar_texto_plano(payload) or ""
+
+
+def sincronizar_tcu_push() -> tuple[int, list[str]]:
+    """Lê a caixa do Gmail conectado em busca de e-mails de push do TCU e atualiza as
+    movimentações dos processos cadastrados. Retorna (quantidade de movimentações novas, avisos)."""
+    if not google_account_connected():
+        return 0, ["Conecte sua conta Google em Autenticações para sincronizar automaticamente."]
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+    except ImportError:
+        return 0, ["Bibliotecas do Google não instaladas. Rode: pip install -r requirements.txt"]
+
+    token_json = st.session_state.email_sender_config["oauth_account"]
+    creds = Credentials.from_authorized_user_info(json.loads(token_json), GMAIL_SCOPES)
+    try:
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            st.session_state.email_sender_config["oauth_account"] = creds.to_json()
+        service = build("gmail", "v1", credentials=creds)
+        resultado_busca = service.users().messages().list(
+            userId="me", q='subject:"[TCU] Acompanhamento Processual"', maxResults=50
+        ).execute()
+        mensagens = resultado_busca.get("messages", [])
+    except Exception as exc:
+        return 0, [f"Falha ao consultar o Gmail: {exc}"]
+
+    processados = st.session_state.setdefault("tcu_push_processed_ids", set())
+    novos = 0
+    avisos: list[str] = []
+
+    for msg_ref in mensagens:
+        msg_id = msg_ref["id"]
+        if msg_id in processados:
+            continue
+        try:
+            mensagem_completa = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
+        except Exception as exc:
+            avisos.append(f"Falha ao ler um e-mail do TCU: {exc}")
+            continue
+
+        processados.add(msg_id)
+        assunto, corpo = _extrair_assunto_corpo_gmail(mensagem_completa)
+        dados = parse_tcu_push_email(assunto, corpo)
+        if not dados:
+            continue
+
+        numero_digitos = tcu_numero_digits(dados["numero_processo"])
+        processo = next(
+            (p for p in st.session_state.tcu_processes if tcu_numero_digits(p["number"]) == numero_digitos), None
+        )
+        if not processo:
+            avisos.append(f"Recebido e-mail do processo TC {dados['numero_processo']}, que não está cadastrado.")
+            continue
+
+        ja_existe = any(
+            m.get("data") == dados["data_evento"] and m.get("descricao") == dados["descricao"]
+            for m in processo["movements"]
+        )
+        if not ja_existe:
+            processo["movements"].append({
+                "data": dados["data_evento"],
+                "descricao": dados["descricao"],
+                "relator": dados["relator"],
+                "interessados": dados["interessados"],
+            })
+            processo["last_query"] = datetime.now()
+            novos += 1
+
+    return novos, avisos
+
+
+def movimentacoes_tcu_processo(processo: dict) -> list[dict]:
+    """Movimentações capturadas via Push (e-mail de acompanhamento processual do TCU)."""
+    return [
+        {
+            "Data": m.get("data"),
+            "Descrição": m.get("descricao"),
+            "Relator": m.get("relator") or "não informado",
+        }
+        for m in processo.get("movements", [])
+    ]
+
+
+CONECTA_TCU_HISTORICO_REGEX = re.compile(
+    r"(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2})\s*-\s*(.+?)"
+    r"(?=\n\s*\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2}\s*-|\Z)",
+    re.DOTALL,
+)
+
+
+def parse_conecta_tcu_historico(texto: str) -> list[dict]:
+    """Extrai (data, descrição) das linhas coladas da aba HISTÓRICO do Conecta-TCU.
+
+    O formato de cada linha é "DD/MM/AAAA HH:MM:SS - descrição"; usa lookahead para a
+    próxima data em vez de dividir por linha, então descrições que quebraram em mais de
+    uma linha ao colar continuam sendo tratadas como uma única movimentação.
+    """
+    entradas = []
+    for match in CONECTA_TCU_HISTORICO_REGEX.finditer(texto or ""):
+        data_str, hora_str, descricao_bruta = match.groups()
+        try:
+            data = datetime.strptime(f"{data_str} {hora_str}", "%d/%m/%Y %H:%M:%S").date()
+        except ValueError:
+            continue
+        descricao = " ".join(descricao_bruta.split())
+        if descricao:
+            entradas.append({"data": data, "descricao": descricao})
+    return entradas
+
+
+def importar_historico_conecta_tcu(processo: dict, texto: str) -> int:
+    """Importa (com deduplicação) as movimentações coladas do Conecta-TCU. Retorna quantas eram novas."""
+    entradas = parse_conecta_tcu_historico(texto)
+    existentes = processo.setdefault("movements_conecta", [])
+    novos = 0
+    for entrada in entradas:
+        ja_existe = any(
+            m.get("data") == entrada["data"] and m.get("descricao") == entrada["descricao"] for m in existentes
+        )
+        if not ja_existe:
+            existentes.append(entrada)
+            novos += 1
+    existentes.sort(key=lambda m: m.get("data") or date.min, reverse=True)
+    if novos:
+        processo["last_query"] = datetime.now()
+    return novos
+
+
+def movimentacoes_tcu_conecta(processo: dict) -> list[dict]:
+    """Movimentações importadas manualmente do histórico completo do Conecta-TCU."""
+    return [
+        {"Data": m.get("data"), "Descrição": m.get("descricao")}
+        for m in processo.get("movements_conecta", [])
+    ]
+
+
+def ultima_movimentacao_tcu(processo: dict):
+    """Última movimentação conhecida, considerando as duas fontes (Push e Conecta-TCU)."""
+    movimentos = movimentacoes_tcu_processo(processo) + movimentacoes_tcu_conecta(processo)
+    if not movimentos:
+        return None, None
+    ultima = max(movimentos, key=lambda m: m.get("Data") or date.min)
+    return ultima.get("Data"), ultima.get("Descrição")
+
+
+@st.dialog("Solicitar novo link de acesso", width="large")
+def show_solicitar_link_dialog() -> None:
+    alerts = collect_link_alerts()
+    if not alerts:
+        status("Nenhum link vencido ou a vencer no momento.", "neutral")
+        return
+
+    st.caption(
+        "Um e-mail é preparado separadamente para cada processo vencido ou a vencer (até 10 dias), com os "
+        "destinatários associados àquele link."
+    )
+
+    remetente = st.session_state.firm_profile.get("email", "")
+    usa_gmail_oauth = is_gmail_address(remetente)
+    remetente_pronto = email_sender_ready()
+
+    if usa_gmail_oauth:
+        if not remetente_pronto:
+            status(
+                "Conecte sua conta Google na página E-mails para habilitar o envio automático. Enquanto isso, "
+                "use as opções abaixo para enviar manualmente.",
+                "warn",
+            )
+    else:
+        status(
+            f"O e-mail cadastrado ({html.escape(remetente) if remetente else 'não informado'}) não é do Gmail. "
+            "Abra cada solicitação no Gmail, Outlook ou no seu app de e-mail padrão para enviar manualmente.",
+            "neutral",
+        )
+
+    pode_enviar = False
+    for alert in sorted(alerts, key=lambda a: (a["categoria"] != "Vencido", a["dias"])):
+        item = alert["item"]
+        processo = item.get("processo") or "Geral"
+        assunto, corpo = render_email_template([alert])
+        destinatarios = collect_alert_recipients([alert])
+        if destinatarios:
+            pode_enviar = True
+
+        dias = alert["dias"]
+        prazo_label = f"vencido há {abs(dias)}d" if alert["categoria"] == "Vencido" else f"vence em {dias}d"
+        with st.expander(f"{item['org']} · Processo {processo} · {prazo_label}", expanded=False):
+            st.markdown('<div class="eyebrow">E-MAIL PADRÃO</div>', unsafe_allow_html=True)
+            st.text_input("Assunto", value=assunto, disabled=True, key=f"solicitar_assunto_{alert['index']}")
+            st.text_area("Corpo", value=corpo, disabled=True, height=180, key=f"solicitar_corpo_{alert['index']}")
+            st.markdown('<div class="eyebrow">DESTINATÁRIOS</div>', unsafe_allow_html=True)
+            if not destinatarios:
+                status("Nenhum e-mail associado a este link. Associe e-mails na página E-mails.", "warn")
+            else:
+                st.write(", ".join(destinatarios))
+
+        if destinatarios and not remetente_pronto:
+            with st.container(key=f"solicitar_send_options_{alert['index']}"):
+                padrao_col, gmail_col, outlook_col = st.columns(3)
+                with padrao_col:
+                    st.link_button(
+                        "App padrão",
+                        mailto_compose_url(destinatarios, assunto, corpo),
+                        use_container_width=True,
+                        help="Abre o cliente de e-mail padrão do seu computador (ex.: Outlook instalado).",
+                    )
+                with gmail_col:
+                    st.link_button(
+                        "Gmail", gmail_compose_url(destinatarios, assunto, corpo), use_container_width=True
+                    )
+                with outlook_col:
+                    st.link_button(
+                        "Outlook (web)", outlook_compose_url(destinatarios, assunto, corpo), use_container_width=True
+                    )
+
+    if usa_gmail_oauth and st.button(
+        "Confirmar e enviar",
+        type="primary",
+        use_container_width=True,
+        disabled=not pode_enviar or not remetente_pronto,
+        key="solicitar_confirmar_envio",
+    ):
+        enviados, falhas, sem_destinatario = 0, [], []
+        for alert in alerts:
+            item = alert["item"]
+            processo = item.get("processo") or "Geral"
+            destinatarios = collect_alert_recipients([alert])
+            if not destinatarios:
+                sem_destinatario.append(processo)
+                continue
+            assunto, corpo = render_email_template([alert])
+            ok, msg = enviar_email(destinatarios, assunto, corpo)
+            if ok:
+                enviados += 1
+            else:
+                falhas.append(f"{processo}: {msg}")
+
+        if enviados:
+            st.success(f"{enviados} e-mail(s) enviado(s), um por processo.")
+        if sem_destinatario:
+            st.warning("Sem e-mail associado, não enviado: " + ", ".join(sem_destinatario))
+        if falhas:
+            st.error("Falha ao enviar: " + "; ".join(falhas))
+
+
+@st.fragment
+def render_alerts_panel() -> None:
+    """Sino independente, fixo no canto superior direito; o balão de notificações só
+    aparece (sobreposto, sem alterar o layout da página) enquanto estiver expandido.
+    Roda como fragment para que abrir/fechar o balão não recarregue o resto da página."""
+    alerts = collect_link_alerts()
+    if not alerts:
+        return
+
+    expanded = st.session_state.get("notifications_enabled", False)
+
+    with st.container(key="alerts_bell_button"):
+        bell_icon = ":material/notifications:" if expanded else ":material/notifications_off:"
+        if st.button(
+            bell_icon,
+            key="toggle_notifications_button",
+            help="Ocultar notificações" if expanded else "Ver notificações",
+        ):
+            st.session_state.notifications_enabled = not expanded
+            st.rerun(scope="fragment")
+
+    if not expanded:
+        return
+
+    with st.container(key="global_alerts_panel"):
+        with st.container(key="alerts_panel_body"):
+            vencidos_alerts = sorted(
+                (a for a in alerts if a["categoria"] == "Vencido"), key=lambda a: a["dias"]
+            )
+            vencendo_alerts = sorted(
+                (a for a in alerts if a["categoria"] == "Em vencimento"), key=lambda a: a["dias"]
+            )
+
+            _fade_step = 0
+
+            def _fade_delay_style() -> str:
+                nonlocal _fade_step
+                delay = min(_fade_step * 0.05, 0.4)
+                _fade_step += 1
+                return f' style="animation-delay:{delay:.2f}s"'
+
+            if vencidos_alerts:
+                st.markdown(
+                    f'<div class="alert-section-title"{_fade_delay_style()}>Links vencidos</div>', unsafe_allow_html=True
+                )
+                for alert in vencidos_alerts:
+                    processo = html.escape(alert["item"].get("processo") or "Geral")
+                    dias = abs(alert["dias"])
+                    st.markdown(
+                        f'<div class="alert-item vencido"{_fade_delay_style()}>Processo {processo} '
+                        f'(há {dias} dia{"s" if dias != 1 else ""})</div>',
+                        unsafe_allow_html=True,
+                    )
+
+            if vencendo_alerts:
+                st.markdown(
+                    f'<div class="alert-section-title"{_fade_delay_style()}>Links a vencer</div>', unsafe_allow_html=True
+                )
+                for alert in vencendo_alerts:
+                    processo = html.escape(alert["item"].get("processo") or "Geral")
+                    dias = alert["dias"]
+                    st.markdown(
+                        f'<div class="alert-item vencendo"{_fade_delay_style()}>Processo {processo} '
+                        f'(daqui a {dias} dia{"s" if dias != 1 else ""})</div>',
+                        unsafe_allow_html=True,
+                    )
+
+        with st.container(key="alerts_panel_footer"):
+            if st.button(
+                "Solicitar novo link",
+                key="alertas_solicitar_link",
+                use_container_width=True,
+                help="Prepara um e-mail de solicitação de renovação para cada processo vencido ou a vencer.",
+            ):
+                show_solicitar_link_dialog()
 
 
 @st.dialog("Cadastrar link de acesso")
 def show_add_credencial_dialog() -> None:
     sei_process_options = ["(nenhum processo vinculado)"] + [p["number"] for p in st.session_state.sei_processes]
     with st.form("credencial_form", clear_on_submit=True):
-        cred_org = st.selectbox("Órgão", SEI_ORGAOS + ["Outro"], key="cred_org")
+        cred_nome = st.text_input("Identificador", placeholder="Ex.: Link licitação 06/2026", key="cred_nome")
+        cred_org = st.selectbox("Órgão", st.session_state.sei_orgaos + ["Outro"], key="cred_org")
         cred_processo = st.selectbox("Processo vinculado", sei_process_options, key="cred_processo")
         cred_link = st.text_input("Link de acesso", placeholder="https://sei.orgao.gov.br/... (ainda não disponível)", key="cred_link")
         cred_validade = st.date_input("Prazo de validade", value=None, key="cred_validade")
@@ -497,10 +1234,12 @@ def show_add_credencial_dialog() -> None:
             st.warning("Informe o link de acesso.")
         else:
             st.session_state.credenciais.append({
+                "nome": cred_nome.strip(),
                 "org": cred_org,
                 "processo": None if cred_processo == "(nenhum processo vinculado)" else cred_processo,
                 "link": cred_link.strip(),
                 "validade": cred_validade,
+                "emails": [],
             })
             st.success("Credencial cadastrada.")
             st.rerun()
@@ -510,17 +1249,26 @@ def show_add_credencial_dialog() -> None:
 def show_edit_credencial_dialog(index: int) -> None:
     item = st.session_state.credenciais[index]
     sei_process_options = ["(nenhum processo vinculado)"] + [p["number"] for p in st.session_state.sei_processes]
-    org_options = SEI_ORGAOS + ["Outro"]
+    org_options = st.session_state.sei_orgaos + ["Outro"]
     current_org = item.get("org")
     org_index = org_options.index(current_org) if current_org in org_options else len(org_options) - 1
     current_processo = item.get("processo") or "(nenhum processo vinculado)"
     processo_index = sei_process_options.index(current_processo) if current_processo in sei_process_options else 0
 
     with st.form("credencial_edit_form"):
+        cred_nome = st.text_input(
+            "Identificador", value=item.get("nome") or "", placeholder="Ex.: Link licitação 06/2026", key="cred_edit_nome"
+        )
         cred_org = st.selectbox("Órgão", org_options, index=org_index, key="cred_edit_org")
         cred_processo = st.selectbox("Processo vinculado", sei_process_options, index=processo_index, key="cred_edit_processo")
         cred_link = st.text_input("Link de acesso", value=item.get("link") or "", key="cred_edit_link")
         cred_validade = st.date_input("Prazo de validade", value=item.get("validade"), key="cred_edit_validade")
+        cred_emails = st.text_area(
+            "E-mail(s) remetente para solicitação de renovação (separados por vírgula)",
+            value=", ".join(item.get("emails") or []),
+            placeholder="ex.: diad@inas.df.gov.br, contato@orgao.gov.br",
+            key="cred_edit_emails",
+        )
         save_col, remove_col = st.columns(2)
         with save_col:
             cred_save = st.form_submit_button("Salvar alterações", use_container_width=True)
@@ -532,10 +1280,12 @@ def show_edit_credencial_dialog(index: int) -> None:
             st.warning("Informe o link de acesso.")
         else:
             st.session_state.credenciais[index] = {
+                "nome": cred_nome.strip(),
                 "org": cred_org,
                 "processo": None if cred_processo == "(nenhum processo vinculado)" else cred_processo,
                 "link": cred_link.strip(),
                 "validade": cred_validade,
+                "emails": [e.strip() for e in cred_emails.split(",") if e.strip()],
             }
             st.success("Credencial atualizada.")
             st.rerun()
@@ -563,43 +1313,82 @@ def show_cred_filter_dialog() -> None:
             st.rerun()
 
 
-def render_sei_process_panel(processo: dict) -> None:
-    st.markdown(
-        f"**Processo:** {processo['number']}  \n"
-        f"**Interessado:** {processo.get('interessado') or 'não informado'} · "
-        f"**Responsável:** {processo.get('responsavel') or 'não informado'}  \n"
-        f"**Órgão:** {processo['org']} · **Tipo:** {processo.get('tipo', 'não informado')}"
-    )
-    last_query = processo.get("last_query")
-    status(f"Última consulta: {last_query.strftime('%d/%m/%Y %H:%M') if last_query else 'nunca consultado'}")
+def _sync_auth_env_var(item: dict) -> None:
+    """Repassa o valor da autenticação para os.environ quando ela alimenta uma variável
+    de ambiente usada pelos conectores (hoje, só a chave do DataJud)."""
+    env_var = item.get("env_var")
+    if env_var and item.get("valor"):
+        os.environ[env_var] = item["valor"]
 
-    if processo.get("forma_acesso") == "Link de acesso":
-        credencial = find_credencial_for_processo(processo["number"])
-        link_col, status_col = st.columns([1, 3])
-        with link_col:
-            with st.container(key=f"sei_dialog_link_{processo['number']}"):
-                st.link_button("↗", credencial["link"] if credencial and credencial.get("link") else "#", disabled=not (credencial and credencial.get("link")))
-        with status_col:
-            if credencial and credencial.get("link"):
-                label, kind = credencial_status(credencial.get("validade"))
-                status(f"Link cadastrado em Links e Autenticações · {label}", kind)
-            else:
-                status("Link ainda não cadastrado.", "warn")
-        st.caption("O botão abre o SEI para captura manual das movimentações mais recentes.")
 
-    st.markdown('<div class="eyebrow">HISTÓRICO DE MOVIMENTAÇÕES</div>', unsafe_allow_html=True)
-    if processo.get("movements"):
-        st.dataframe(
-            [
-                {"Data": mov.get("data"), "Unidade": mov.get("unidade"), "Descrição": mov.get("descricao")}
-                for mov in processo["movements"]
-            ],
-            use_container_width=True,
-            hide_index=True,
-            column_config={"Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY")},
+@st.dialog("Cadastrar autenticação")
+def show_add_auth_dialog() -> None:
+    with st.form("auth_form", clear_on_submit=True):
+        auth_chave = st.text_input(
+            "Chave (identificador)", placeholder="Ex.: SEI, GOV.br, DataJud...", key="auth_chave"
         )
-    else:
-        status("Nenhuma movimentação capturada ainda para este processo.")
+        auth_sistema = st.text_input(
+            "Sistema/Órgão", placeholder="Ex.: SEI do Ministério do Esporte", key="auth_sistema"
+        )
+        auth_usuario = st.text_input("Usuário/Login", placeholder="Opcional", key="auth_usuario")
+        auth_valor = st.text_input(
+            "Senha ou chave de API", type="password", placeholder="Opcional", key="auth_valor"
+        )
+        auth_obs = st.text_input("Observação", placeholder="Opcional", key="auth_obs")
+        auth_add = st.form_submit_button("Cadastrar", use_container_width=True)
+    if auth_add:
+        if not auth_chave.strip():
+            st.warning("Informe a chave (identificador).")
+        else:
+            st.session_state.auth_credenciais.append({
+                "chave": auth_chave.strip(),
+                "sistema": auth_sistema.strip(),
+                "usuario": auth_usuario.strip(),
+                "valor": auth_valor,
+                "observacao": auth_obs.strip(),
+                "env_var": None,
+            })
+            st.success("Autenticação cadastrada.")
+            st.rerun()
+
+
+@st.dialog("Editar autenticação")
+def show_edit_auth_dialog(index: int) -> None:
+    item = st.session_state.auth_credenciais[index]
+    with st.form("auth_edit_form"):
+        auth_chave = st.text_input("Chave (identificador)", value=item.get("chave") or "", key="auth_edit_chave")
+        auth_sistema = st.text_input("Sistema/Órgão", value=item.get("sistema") or "", key="auth_edit_sistema")
+        auth_usuario = st.text_input("Usuário/Login", value=item.get("usuario") or "", key="auth_edit_usuario")
+        auth_valor = st.text_input(
+            "Senha ou chave de API", value=item.get("valor") or "", type="password", key="auth_edit_valor"
+        )
+        auth_obs = st.text_input("Observação", value=item.get("observacao") or "", key="auth_edit_obs")
+        save_col, remove_col = st.columns(2)
+        with save_col:
+            auth_save = st.form_submit_button("Salvar alterações", use_container_width=True)
+        with remove_col:
+            auth_remove = st.form_submit_button("Remover autenticação", use_container_width=True)
+
+    if auth_save:
+        if not auth_chave.strip():
+            st.warning("Informe a chave (identificador).")
+        else:
+            updated = {
+                "chave": auth_chave.strip(),
+                "sistema": auth_sistema.strip(),
+                "usuario": auth_usuario.strip(),
+                "valor": auth_valor,
+                "observacao": auth_obs.strip(),
+                "env_var": item.get("env_var"),
+            }
+            _sync_auth_env_var(updated)
+            st.session_state.auth_credenciais[index] = updated
+            st.success("Autenticação atualizada.")
+            st.rerun()
+    if auth_remove:
+        st.session_state.auth_credenciais.pop(index)
+        st.success("Autenticação removida.")
+        st.rerun()
 
 
 DJEN_COUNT_CAP = 10000
@@ -615,6 +1404,14 @@ def format_cnpj_br(digits: str) -> str:
     if len(digits) != 14:
         return digits
     return f"{digits[0:2]}.{digits[2:5]}.{digits[5:8]}/{digits[8:12]}-{digits[12:14]}"
+
+
+def mask_secret(value: str | None) -> str:
+    if not value:
+        return "Não configurada"
+    if len(value) <= 8:
+        return "•" * len(value)
+    return f"{value[:4]}{'•' * 8}{value[-4:]}"
 
 
 def resolve_orgao_label(numero: str) -> str:
@@ -718,7 +1515,6 @@ def _render_movimentacoes_rows(rows: list[dict]) -> None:
 def show_movimentacoes_dialog(
     titulo: str,
     rows: list[dict] | None = None,
-    nav_state: dict | None = None,
     ultima_atualizacao=None,
     consultar_link: str | None = None,
     consultar_proc: dict | None = None,
@@ -727,6 +1523,11 @@ def show_movimentacoes_dialog(
     sources: dict[str, list[dict]] | None = None,
     default_source: str | None = None,
     unavailable_sources: dict[str, str] | None = None,
+    source_widgets: dict[str, "Callable[[], None]"] | None = None,
+    sincronizar_action=None,
+    sincronizar_disabled: bool = False,
+    sincronizar_help: str | None = None,
+    busca_publica_url: str | None = None,
 ) -> None:
     st.markdown(f'<div class="eyebrow">{html.escape(titulo)}</div>', unsafe_allow_html=True)
 
@@ -735,17 +1536,43 @@ def show_movimentacoes_dialog(
             with st.spinner("Consultando..."):
                 consultar_action()
     elif consultar_proc is not None:
-        st.link_button(
-            "Consultar",
-            consultar_link or "#",
-            type="primary",
-            use_container_width=True,
-            disabled=not consultar_link,
-            on_click=lambda proc=consultar_proc: proc.__setitem__("last_query", datetime.now()),
-            key="mov_dialog_consultar",
-        )
+        if sincronizar_action is not None:
+            consultar_col, sincronizar_col = st.columns([3, 2])
+        else:
+            consultar_col, sincronizar_col = st.container(), None
+        with consultar_col:
+            st.link_button(
+                "Consultar",
+                consultar_link or "#",
+                type="primary",
+                use_container_width=True,
+                disabled=not consultar_link,
+                key="mov_dialog_consultar",
+            )
+        if sincronizar_col is not None:
+            with sincronizar_col:
+                if st.button(
+                    "Sincronizar",
+                    use_container_width=True,
+                    key="mov_dialog_sincronizar",
+                    disabled=sincronizar_disabled,
+                    help=sincronizar_help,
+                ):
+                    with st.spinner("Sincronizando..."):
+                        sync_novos, sync_avisos = sincronizar_action()
+                    if sync_novos:
+                        st.success(f"{sync_novos} nova(s) movimentação(ões) importada(s).")
+                    elif not sync_avisos:
+                        st.info("Nenhuma movimentação nova encontrada.")
+                    for sync_aviso in sync_avisos:
+                        st.warning(sync_aviso)
         if not consultar_link:
             status("Link de acesso não cadastrado para este processo.", "warn")
+        if busca_publica_url:
+            st.caption(
+                "Exige login no Conecta TCU (histórico completo). Sem login? "
+                f"[Busca pública, sem login ↗]({busca_publica_url})"
+            )
 
     if refresh is not None:
         refreshed = refresh()
@@ -767,19 +1594,13 @@ def show_movimentacoes_dialog(
         if unavailable_sources and chosen_source in unavailable_sources:
             status(unavailable_sources[chosen_source])
         else:
+            if source_widgets and chosen_source in source_widgets:
+                source_widgets[chosen_source]()
+                if refresh is not None:
+                    sources = refresh().get("sources", sources)
             _render_movimentacoes_rows(sources.get(chosen_source, []))
     else:
         _render_movimentacoes_rows(rows or [])
-
-    if nav_state:
-        with st.container(key="mov_dialog_goto_wrap"):
-            goto_col = st.columns([3, 2])[1]
-            with goto_col:
-                if st.button("leve-me até lá  →", key="mov_dialog_goto", use_container_width=True):
-                    for state_key, state_value in nav_state.items():
-                        st.session_state[state_key] = state_value
-                    st.session_state.active_module = "Monitoramento"
-                    st.rerun()
 
 
 def dje_datajud_rows(numero: str) -> list[dict]:
@@ -842,31 +1663,56 @@ def movimentacoes_cnpj(cnpj_key: str) -> list[dict]:
     ]
 
 
-def consultar_dje_processo(process_number: str) -> None:
+def _fetch_dje_processo_dados(parsed: NumeroProcessoCNJ) -> dict:
+    """Só faz as chamadas de rede (sem tocar em st.session_state) — pode rodar em outra thread."""
+    process_number = parsed.bruto
+    dados: dict = {"djen_response": None, "datajud_result": None, "erros": []}
     try:
-        parsed = NumeroProcessoCNJ.parse(process_number)
-    except ValueError:
-        parsed = None
-    if not parsed:
-        st.error("Informe um número CNJ válido.")
-        return
-    try:
-        response = ComunicaClient().buscar_todos(numero_processo=process_number)
-        st.session_state.djen_results[process_number] = response
+        dados["djen_response"] = ComunicaClient().buscar_todos(numero_processo=process_number)
     except ComunicaError as exc:
-        st.error(f"DJEN: {exc}")
+        dados["erros"].append(f"DJEN: {exc}")
     try:
         client = DataJudClient()
         response = client.buscar_por_numero_processo(parsed)
         hits = response.get("hits", {}).get("hits", [])
         source = hits[0].get("_source", {}) if hits else {}
         movements = client.extrair_movimentacoes(response)
-        st.session_state.datajud_results[process_number] = {
-            "response": response, "source": source, "movements": movements,
-        }
+        dados["datajud_result"] = {"response": response, "source": source, "movements": movements}
     except DataJudError as exc:
-        st.error(f"DataJud: {exc}")
-    st.session_state.query_timestamps[process_number] = datetime.now()
+        dados["erros"].append(f"DataJud: {exc}")
+    return dados
+
+
+def _aplicar_dje_processo_dados(process_number: str, dados: dict) -> tuple[bool, list[str]]:
+    """Grava em st.session_state o resultado de `_fetch_dje_processo_dados` — só na thread principal."""
+    obteve_dados = False
+    if dados["djen_response"] is not None:
+        st.session_state.djen_results[process_number] = dados["djen_response"]
+        obteve_dados = True
+    if dados["datajud_result"] is not None:
+        st.session_state.datajud_results[process_number] = dados["datajud_result"]
+        obteve_dados = True
+    if obteve_dados:
+        st.session_state.query_timestamps[process_number] = datetime.now()
+    return obteve_dados, dados["erros"]
+
+
+def consultar_dje_processo(process_number: str, *, silent: bool = False) -> tuple[bool, list[str]]:
+    try:
+        parsed = NumeroProcessoCNJ.parse(process_number)
+    except ValueError:
+        parsed = None
+    if not parsed:
+        msg = "Informe um número CNJ válido."
+        if not silent:
+            st.error(msg)
+        return False, [msg]
+    dados = _fetch_dje_processo_dados(parsed)
+    obteve_dados, erros = _aplicar_dje_processo_dados(process_number, dados)
+    if not silent:
+        for erro in erros:
+            st.error(erro)
+    return obteve_dados, erros
 
 
 DJE_CNPJ_NOT_IMPLEMENTED_MSG = (
@@ -877,14 +1723,33 @@ DJE_CNPJ_NOT_IMPLEMENTED_MSG = (
 )
 
 
-def consultar_dje_cnpj(cnpj_item: dict) -> None:
-    cnpj_key = cnpj_item["cnpj"]
+def _fetch_dje_cnpj_dados(cnpj_item: dict) -> dict:
+    """Só faz a chamada de rede (sem tocar em st.session_state) — pode rodar em outra thread."""
+    dados: dict = {"djen_response": None, "erro": None}
     try:
-        response = ComunicaClient().buscar_todos(nome_parte=cnpj_item["label"])
-        st.session_state.djen_cnpj_results[cnpj_key] = response
-        st.session_state.cnpj_query_timestamps[cnpj_key] = datetime.now()
+        dados["djen_response"] = ComunicaClient().buscar_todos(nome_parte=cnpj_item["label"])
     except ComunicaError as exc:
-        st.error(f"DJEN: {exc}")
+        dados["erro"] = f"DJEN: {exc}"
+    return dados
+
+
+def _aplicar_dje_cnpj_dados(cnpj_key: str, dados: dict) -> tuple[bool, list[str]]:
+    """Grava em st.session_state o resultado de `_fetch_dje_cnpj_dados` — só na thread principal."""
+    if dados["djen_response"] is not None:
+        st.session_state.djen_cnpj_results[cnpj_key] = dados["djen_response"]
+        st.session_state.cnpj_query_timestamps[cnpj_key] = datetime.now()
+        return True, []
+    return False, [dados["erro"]] if dados["erro"] else []
+
+
+def consultar_dje_cnpj(cnpj_item: dict, *, silent: bool = False) -> tuple[bool, list[str]]:
+    cnpj_key = cnpj_item["cnpj"]
+    dados = _fetch_dje_cnpj_dados(cnpj_item)
+    obteve_dados, erros = _aplicar_dje_cnpj_dados(cnpj_key, dados)
+    if not silent:
+        for erro in erros:
+            st.error(erro)
+    return obteve_dados, erros
 
 
 if "processes" not in st.session_state:
@@ -896,8 +1761,8 @@ if "processes" not in st.session_state:
     ]
 if "monitored_cnpjs" not in st.session_state:
     st.session_state.monitored_cnpjs = [
-        {"cnpj": "01652106000132", "label": "Express Brasília Hospedagem e Turismo S/A", "cliente": "", "responsavel": ""},
-        {"cnpj": "05217384000151", "label": "H Plus Administração e Hotelaria Ltda", "cliente": "", "responsavel": ""},
+        {"cnpj": "01652106000132", "label": "Express Brasília Hospedagem e Turismo S/A", "interessado": "", "responsavel": ""},
+        {"cnpj": "05217384000151", "label": "H Plus Administração e Hotelaria Ltda", "interessado": "", "responsavel": ""},
     ]
 if "djen_results" not in st.session_state:
     st.session_state.djen_results = {}
@@ -917,31 +1782,261 @@ if "sei_processes" not in st.session_state:
             "interessado": "",
             "responsavel": "",
             "sistema_origem": "SEI",
-            "tipo": "Outro",
-            "forma_acesso": "Link de acesso",
+            "forma_acesso": "Restrito",
+            "link": "",
+            "movements": [],
+            "last_query": None,
+        },
+        {
+            "number": "58000-00012345/2025-71",
+            "org": "Ministério do Esporte",
+            "interessado": "",
+            "responsavel": "",
+            "sistema_origem": "SEI",
+            "forma_acesso": "Restrito",
+            "link": "",
+            "movements": [],
+            "last_query": None,
+        },
+        {
+            "number": "04001-00007300/2025-88",
+            "org": "Governo do Distrito Federal",
+            "interessado": "",
+            "responsavel": "",
+            "sistema_origem": "SEI",
+            "forma_acesso": "Restrito",
+            "link": "",
+            "movements": [],
+            "last_query": None,
+        },
+        {
+            "number": "58000-00012999/2025-05",
+            "org": "Ministério do Esporte",
+            "interessado": "",
+            "responsavel": "",
+            "sistema_origem": "SEI",
+            "forma_acesso": "Restrito",
+            "link": "",
+            "movements": [],
+            "last_query": None,
+        },
+        {
+            "number": "04001-00007555/2025-20",
+            "org": "Governo do Distrito Federal",
+            "interessado": "",
+            "responsavel": "",
+            "sistema_origem": "SEI",
+            "forma_acesso": "Restrito",
+            "link": "",
+            "movements": [],
+            "last_query": None,
+        },
+        {
+            "number": "58000-00013500/2025-40",
+            "org": "Ministério do Esporte",
+            "interessado": "",
+            "responsavel": "",
+            "sistema_origem": "SEI",
+            "forma_acesso": "Restrito",
+            "link": "",
+            "movements": [],
+            "last_query": None,
+        },
+        {
+            "number": "00220-00006906/2024-56",
+            "org": "Governo do Distrito Federal",
+            "interessado": "",
+            "responsavel": "",
+            "sistema_origem": "SEI",
+            "forma_acesso": "Consulta pública",
+            "link": "",
             "movements": [],
             "last_query": None,
         },
     ]
+if "tcu_processes" not in st.session_state:
+    st.session_state.tcu_processes = [
+        {
+            "number": "010.139/2026-5",
+            "tipo": "Outro",
+            "interessado": "",
+            "responsavel": "",
+            "conecta_url": "",
+            "movements": [],
+            "movements_conecta": [],
+            "last_query": None,
+        },
+        {
+            "number": "006.971/2026-1",
+            "tipo": "Outro",
+            "interessado": "",
+            "responsavel": "",
+            "conecta_url": "",
+            "movements": [],
+            "movements_conecta": [],
+            "last_query": None,
+        },
+        {
+            "number": "003.060/2026-8",
+            "tipo": "Outro",
+            "interessado": "",
+            "responsavel": "",
+            "conecta_url": "",
+            "movements": [],
+            "movements_conecta": [],
+            "last_query": None,
+        },
+    ]
+if "tcu_push_processed_ids" not in st.session_state:
+    st.session_state.tcu_push_processed_ids = set()
 if "credenciais" not in st.session_state:
     st.session_state.credenciais = [
         {
+            "nome": "Link GDF · processo 6993",
             "org": "Governo do Distrito Federal",
             "processo": "04001-00006993/2025-40",
             "link": "http://sei.df.gov.br/sei/processo_acesso_externo_consulta.php?id_acesso_externo=2442842&infra_hash=f930b708871a3a2490e540fef130a96a",
             "validade": date(2026, 9, 4),
+            "emails": ["diad@inas.df.gov.br"],
+        },
+        {
+            "nome": "Link Min. Esporte · processo 12345",
+            "org": "Ministério do Esporte",
+            "processo": "58000-00012345/2025-71",
+            "link": "https://sei.esporte.gov.br/sei/processo_acesso_externo_consulta.php?id_acesso_externo=999001&infra_hash=exemplo1",
+            "validade": date(2027, 3, 15),
+            "emails": ["viniciusfeijo360@gmail.com"],
+        },
+        {
+            "nome": "Link GDF · processo 7300",
+            "org": "Governo do Distrito Federal",
+            "processo": "04001-00007300/2025-88",
+            "link": "http://sei.df.gov.br/sei/processo_acesso_externo_consulta.php?id_acesso_externo=999002&infra_hash=exemplo2",
+            "validade": date(2026, 12, 1),
+            "emails": ["viniciusfeijo360@gmail.com"],
+        },
+        {
+            "nome": "Link Min. Esporte · processo 12999",
+            "org": "Ministério do Esporte",
+            "processo": "58000-00012999/2025-05",
+            "link": "https://sei.esporte.gov.br/sei/processo_acesso_externo_consulta.php?id_acesso_externo=999003&infra_hash=exemplo3",
+            "validade": date.today() - timedelta(days=15),
+            "emails": ["viniciusfeijo360@gmail.com"],
+        },
+        {
+            "nome": "Link GDF · processo 7555",
+            "org": "Governo do Distrito Federal",
+            "processo": "04001-00007555/2025-20",
+            "link": "http://sei.df.gov.br/sei/processo_acesso_externo_consulta.php?id_acesso_externo=999004&infra_hash=exemplo4",
+            "validade": date.today() - timedelta(days=40),
+            "emails": ["viniciusfeijo360@gmail.com"],
+        },
+        {
+            "nome": "Link Min. Esporte · processo 13500",
+            "org": "Ministério do Esporte",
+            "processo": "58000-00013500/2025-40",
+            "link": "https://sei.esporte.gov.br/sei/processo_acesso_externo_consulta.php?id_acesso_externo=999005&infra_hash=exemplo5",
+            "validade": date.today() + timedelta(days=180),
+            "emails": ["viniciusfeijo360@gmail.com"],
+        },
+    ]
+if "email_sender_config" not in st.session_state:
+    st.session_state.email_sender_config = {
+        "oauth_account": None,  # credenciais OAuth (JSON) depois de conectar a conta Google
+    }
+if "notifications_enabled" not in st.session_state:
+    st.session_state.notifications_enabled = False
+if "email_template" not in st.session_state:
+    st.session_state.email_template = {
+        "assunto": "Solicitação de renovação de link de acesso – Processo {processo}",
+        "corpo": (
+            "Prezados,\n\n"
+            "O link de acesso ao processo {processo} está com status: {status}.\n\n"
+            "Link atual: {link}\n\n"
+            "Solicitamos a gentileza de providenciar a emissão de um novo link de acesso.\n\n"
+            "Atenciosamente,\n"
+            "{usuario}\n"
+            "{escritorio}"
+        ),
+    }
+
+if "auth_credenciais" not in st.session_state:
+    st.session_state.auth_credenciais = [
+        {
+            "chave": "E-mail",
+            "sistema": "E-mail do usuário",
+            "usuario": st.session_state.get("firm_profile", {}).get("email") or "",
+            "valor": "",
+            "observacao": "Login e senha da conta de e-mail do dia a dia (quando não for Gmail com login por Google).",
+            "env_var": None,
+        },
+        {
+            "chave": "SEI",
+            "sistema": "SEI",
+            "usuario": "",
+            "valor": "",
+            "observacao": "Login e senha de acesso restrito ao SEI de cada órgão.",
+            "env_var": None,
+        },
+        {
+            "chave": "GOV.br",
+            "sistema": "GOV.br",
+            "usuario": "",
+            "valor": "",
+            "observacao": "Login único do governo federal, usado por sistemas como o Conecta TCU.",
+            "env_var": None,
+        },
+        {
+            "chave": "DataJud",
+            "sistema": "DataJud (CNJ)",
+            "usuario": "",
+            "valor": os.environ.get("DATAJUD_API_KEY", ""),
+            "observacao": "Chave de API para consulta de movimentações processuais no DataJud.",
+            "env_var": "DATAJUD_API_KEY",
+        },
+        {
+            "chave": "DJEN",
+            "sistema": "DJEN",
+            "usuario": "",
+            "valor": "",
+            "observacao": "Chave de API do Diário de Justiça Eletrônico Nacional, se vier a ser exigida.",
+            "env_var": None,
+        },
+        {
+            "chave": "DJe",
+            "sistema": "DJe",
+            "usuario": "",
+            "valor": "",
+            "observacao": "Ainda não disponível — a API própria do DJe não tem integração implementada.",
+            "env_var": None,
+        },
+        {
+            "chave": "TCU",
+            "sistema": "TCU · Conecta TCU",
+            "usuario": "",
+            "valor": "",
+            "observacao": "Usuário e senha (login GOV.br) do Conecta TCU, usado para consultar o histórico completo.",
+            "env_var": None,
         },
     ]
 
-SEI_ORGAOS = ["Ministério do Esporte", "Governo do Distrito Federal"]
-SEI_TIPOS = ["Sancionador", "Prestação de contas", "Convênio", "Outro"]
-SEI_FORMAS_ACESSO = ["Link de acesso", "Consulta pública"]
+SEI_ORGAOS_DEFAULT = ["Ministério do Esporte", "Governo do Distrito Federal"]
+if "sei_orgaos" not in st.session_state:
+    st.session_state.sei_orgaos = list(SEI_ORGAOS_DEFAULT)
+SEI_FORMAS_ACESSO = ["Restrito", "Consulta pública"]
+SEI_CONSULTA_PUBLICA_URLS = {
+    "Governo do Distrito Federal": (
+        "https://sei.df.gov.br/sei/modulos/pesquisa/md_pesq_processo_pesquisar.php"
+        "?acao_externa=protocolo_pesquisar&acao_origem_externa=protocolo_pesquisar&id_orgao_acesso_externo=0"
+    ),
+}
+TCU_TIPOS = ["Sancionador", "Prestação de contas", "Convênio", "Outro"]
 
 
 @st.dialog("Cadastrar processo")
 def show_add_process_dialog() -> None:
     with st.form("process_form", clear_on_submit=True):
-        new_process_label = st.text_input("Nome de referência", placeholder="Ex.: Ação principal · cliente")
+        new_process_label = st.text_input("Interessado", placeholder="Ex.: Federação X")
         new_process_number = st.text_input("Número CNJ", value="", placeholder="0000000-00.0000.0.00.0000")
         new_process_responsavel = st.text_input("Responsável", placeholder="Ex.: Advogado(a) responsável")
         add_process = st.form_submit_button("Adicionar à lista", use_container_width=True)
@@ -997,18 +2092,18 @@ def show_add_process_dialog() -> None:
 def show_add_cnpj_dialog() -> None:
     with st.form("cnpj_form", clear_on_submit=True):
         cnpj = st.text_input("CNPJ", placeholder="00.000.000/0000-00")
-        cnpj_label = st.text_input("Nome da empresa / Razão Social", placeholder="Empresa monitorada")
-        cnpj_cliente = st.text_input("Nome do Cliente", placeholder="Ex.: Cliente responsável por este CNPJ")
+        cnpj_label = st.text_input("Razão Social", placeholder="Empresa monitorada")
+        cnpj_interessado = st.text_input("Interessado", placeholder="Ex.: Federação X")
         add_cnpj = st.form_submit_button("Adicionar CNPJ", use_container_width=True)
     if add_cnpj:
         digits = "".join(char for char in cnpj if char.isdigit())
         if len(digits) != 14 or not cnpj_label.strip():
-            st.warning("Informe um CNPJ válido e o nome da empresa.")
+            st.warning("Informe um CNPJ válido e a Razão Social.")
         elif any(item["cnpj"] == digits for item in st.session_state.monitored_cnpjs):
             st.warning("Esse CNPJ já está monitorado.")
         else:
             st.session_state.monitored_cnpjs.append(
-                {"cnpj": digits, "label": cnpj_label.strip(), "cliente": cnpj_cliente.strip()}
+                {"cnpj": digits, "label": cnpj_label.strip(), "interessado": cnpj_interessado.strip()}
             )
             st.success("CNPJ adicionado ao monitoramento.")
             st.rerun()
@@ -1035,7 +2130,7 @@ def show_add_cnpj_dialog() -> None:
                     duplicated += 1
                     continue
                 st.session_state.monitored_cnpjs.append(
-                    {"cnpj": digits, "label": raw_label or "Empresa importada", "cliente": "", "responsavel": ""}
+                    {"cnpj": digits, "label": raw_label or "Empresa importada", "interessado": "", "responsavel": ""}
                 )
                 added += 1
             if added:
@@ -1052,7 +2147,7 @@ def show_add_cnpj_dialog() -> None:
 def show_edit_process_dialog(index: int) -> None:
     item = st.session_state.processes[index]
     with st.form("process_edit_form"):
-        edit_label = st.text_input("Nome de referência", value=item["label"])
+        edit_label = st.text_input("Interessado", value=item["label"])
         edit_number = st.text_input("Número CNJ", value=item["number"])
         edit_responsavel = st.text_input("Responsável", value=item.get("responsavel") or "")
         save_col, remove_col = st.columns(2)
@@ -1094,8 +2189,8 @@ def show_edit_cnpj_dialog(index: int) -> None:
     item = st.session_state.monitored_cnpjs[index]
     with st.form("cnpj_edit_form"):
         edit_cnpj = st.text_input("CNPJ", value=format_cnpj_br(item["cnpj"]))
-        edit_label = st.text_input("Nome da empresa / Razão Social", value=item["label"])
-        edit_cliente = st.text_input("Nome do Cliente", value=item.get("cliente") or "")
+        edit_label = st.text_input("Razão Social", value=item["label"])
+        edit_interessado = st.text_input("Interessado", value=item.get("interessado") or "")
         edit_responsavel = st.text_input("Responsável", value=item.get("responsavel") or "")
         save_col, remove_col = st.columns(2)
         with save_col:
@@ -1105,14 +2200,14 @@ def show_edit_cnpj_dialog(index: int) -> None:
     if save:
         digits = "".join(char for char in edit_cnpj if char.isdigit())
         if len(digits) != 14 or not edit_label.strip():
-            st.warning("Informe um CNPJ válido e o nome da empresa.")
+            st.warning("Informe um CNPJ válido e a Razão Social.")
         elif any(i != index and other["cnpj"] == digits for i, other in enumerate(st.session_state.monitored_cnpjs)):
             st.warning("Esse CNPJ já está monitorado.")
         else:
             st.session_state.monitored_cnpjs[index] = {
                 "cnpj": digits,
                 "label": edit_label.strip(),
-                "cliente": edit_cliente.strip(),
+                "interessado": edit_interessado.strip(),
                 "responsavel": edit_responsavel.strip(),
             }
             st.success("CNPJ atualizado.")
@@ -1142,32 +2237,62 @@ def show_process_filter_dialog() -> None:
 
 
 @st.dialog("Cadastrar processo administrativo")
-def show_add_sei_process_dialog(sei_org_name: str) -> None:
-    with st.form(f"sei_form_{sei_org_name}", clear_on_submit=True):
-        sei_number = st.text_input("Número do processo", placeholder="Ex.: 58000.012345/2026-11", key=f"sei_number_{sei_org_name}")
-        sei_interessado = st.text_input("Interessado / Cliente", placeholder="Ex.: Federação X", key=f"sei_interessado_{sei_org_name}")
-        sei_responsavel = st.text_input("Responsável", placeholder="Ex.: Advogado(a) responsável", key=f"sei_responsavel_{sei_org_name}")
-        sei_sistema_origem = st.text_input("Sistema de origem", value="SEI", placeholder="Ex.: SEI", key=f"sei_sistema_{sei_org_name}")
-        sei_tipo_col, sei_forma_col = st.columns(2)
-        with sei_tipo_col:
-            sei_tipo = st.selectbox("Tipo", SEI_TIPOS, key=f"sei_tipo_{sei_org_name}")
-        with sei_forma_col:
-            sei_forma_acesso = st.selectbox("Forma de acesso", SEI_FORMAS_ACESSO, key=f"sei_forma_{sei_org_name}")
+def show_add_sei_process_dialog(sei_org_name: str | None = None) -> None:
+    key_suffix = sei_org_name or "todos"
+
+    if sei_org_name is None:
+        sei_org_selected = st.selectbox("Órgão", st.session_state.sei_orgaos, key=f"sei_org_{key_suffix}")
+    else:
+        sei_org_selected = sei_org_name
+
+    sei_forma_acesso = st.selectbox("Forma de acesso", SEI_FORMAS_ACESSO, key=f"sei_forma_{key_suffix}")
+
+    org_credenciais: list[dict] = []
+    link_labels: list[str] = []
+    sei_link_text = ""
+    if sei_forma_acesso == "Restrito":
+        org_credenciais = credenciais_com_link_do_orgao(sei_org_selected)
+        link_labels = ["(nenhum)"] + [credencial_link_label(c) for c in org_credenciais]
+        link_select_col, link_add_col = st.columns([5, 1])
+        with link_select_col:
+            sei_link_choice = st.selectbox("Link de acesso", link_labels, key=f"sei_link_choice_{key_suffix}")
+        with link_add_col:
+            st.markdown("<div style='height:1.6rem'></div>", unsafe_allow_html=True)
+            if st.button("+", key=f"sei_link_add_{key_suffix}", help="Cadastrar link de acesso em Links e E-mails", use_container_width=True):
+                st.session_state.active_module = "Links e E-mails"
+                st.rerun()
+        if not org_credenciais:
+            st.caption(f"Nenhum link cadastrado para {sei_org_selected} ainda. Use o botão \"+\" para cadastrar um em Links e E-mails.")
+    else:
+        sei_link_text = st.text_input(
+            "Link de acesso", placeholder="https://sei.orgao.gov.br/... (opcional)", key=f"sei_link_text_{key_suffix}"
+        )
+
+    with st.form(f"sei_form_{key_suffix}", clear_on_submit=True):
+        sei_number = st.text_input("Número do processo", placeholder="Ex.: 58000.012345/2026-11", key=f"sei_number_{key_suffix}")
+        sei_interessado = st.text_input("Interessado", placeholder="Ex.: Federação X", key=f"sei_interessado_{key_suffix}")
+        sei_responsavel = st.text_input("Responsável", placeholder="Ex.: Advogado(a) responsável", key=f"sei_responsavel_{key_suffix}")
+        sei_sistema_origem = st.text_input("Sistema de origem", value="SEI", placeholder="Ex.: SEI", key=f"sei_sistema_{key_suffix}")
         sei_add = st.form_submit_button("Cadastrar processo", use_container_width=True)
     if sei_add:
         if not sei_number.strip():
             st.warning("Informe o número do processo.")
-        elif any(p["number"] == sei_number.strip() and p["org"] == sei_org_name for p in st.session_state.sei_processes):
+        elif any(p["number"] == sei_number.strip() and p["org"] == sei_org_selected for p in st.session_state.sei_processes):
             st.warning("Esse processo já está cadastrado para este órgão.")
         else:
+            if sei_forma_acesso == "Restrito":
+                link_choice_index = link_labels.index(sei_link_choice)
+                resolved_link = "" if link_choice_index == 0 else org_credenciais[link_choice_index - 1]["link"]
+            else:
+                resolved_link = sei_link_text.strip()
             st.session_state.sei_processes.append({
                 "number": sei_number.strip(),
-                "org": sei_org_name,
+                "org": sei_org_selected,
                 "interessado": sei_interessado.strip(),
                 "responsavel": sei_responsavel.strip(),
                 "sistema_origem": sei_sistema_origem.strip() or "SEI",
-                "tipo": sei_tipo,
                 "forma_acesso": sei_forma_acesso,
+                "link": resolved_link,
                 "movements": [],
                 "last_query": None,
             })
@@ -1202,43 +2327,121 @@ def show_sei_todos_filter_dialog() -> None:
 @st.dialog("Filtrar processos")
 def show_sei_filter_dialog(sei_org_name: str) -> None:
     state_key = f"sei_filters_{sei_org_name}"
-    filters = st.session_state.setdefault(state_key, {"tipos": []})
-    org_processes = [p for p in st.session_state.sei_processes if p["org"] == sei_org_name]
-    tipo_options = sorted({p.get("tipo") for p in org_processes if p.get("tipo")})
-    selected_tipos = st.multiselect(
-        "Tipo", tipo_options, default=[t for t in filters["tipos"] if t in tipo_options], key=f"sei_filter_tipos_input_{sei_org_name}"
+    filters = st.session_state.setdefault(state_key, {"formas_acesso": []})
+    selected_formas = st.multiselect(
+        "Forma de acesso",
+        SEI_FORMAS_ACESSO,
+        default=[f for f in filters["formas_acesso"] if f in SEI_FORMAS_ACESSO],
+        key=f"sei_filter_formas_input_{sei_org_name}",
     )
     apply_col, clear_col = st.columns(2)
     with apply_col:
         if st.button("Aplicar filtros", key=f"sei_filter_apply_{sei_org_name}", type="primary", use_container_width=True):
-            st.session_state[state_key] = {"tipos": selected_tipos}
+            st.session_state[state_key] = {"formas_acesso": selected_formas}
             st.rerun()
     with clear_col:
         if st.button("Limpar filtros", key=f"sei_filter_clear_{sei_org_name}", use_container_width=True):
-            st.session_state[state_key] = {"tipos": []}
+            st.session_state[state_key] = {"formas_acesso": []}
+            st.rerun()
+
+
+@st.dialog("Adicionar órgão")
+def show_add_sei_orgao_dialog() -> None:
+    with st.form("sei_add_orgao_form", clear_on_submit=True):
+        new_sei_orgao = st.text_input(
+            "Nome do órgão", placeholder="Ex.: Ministério da Justiça", key="sei_new_orgao_input"
+        )
+        add_sei_orgao_submit = st.form_submit_button("Adicionar órgão", use_container_width=True)
+    if add_sei_orgao_submit:
+        new_orgao_name = new_sei_orgao.strip()
+        if not new_orgao_name:
+            st.warning("Informe o nome do órgão.")
+        elif new_orgao_name in st.session_state.sei_orgaos:
+            st.warning("Esse órgão já está cadastrado.")
+        else:
+            st.session_state.sei_orgaos.append(new_orgao_name)
+            st.success("Órgão adicionado.")
+            st.rerun()
+
+
+@st.dialog("Filtrar processos")
+def show_sei_cadastro_todos_filter_dialog() -> None:
+    filters = st.session_state.setdefault("sei_filters_todos", {"formas_acesso": [], "orgaos": []})
+    orgao_options = sorted({p["org"] for p in st.session_state.sei_processes})
+    selected_orgaos = st.multiselect(
+        "Órgão", orgao_options, default=[o for o in filters["orgaos"] if o in orgao_options], key="sei_cadastro_todos_filter_orgaos_input"
+    )
+    selected_formas = st.multiselect(
+        "Forma de acesso",
+        SEI_FORMAS_ACESSO,
+        default=[f for f in filters["formas_acesso"] if f in SEI_FORMAS_ACESSO],
+        key="sei_cadastro_todos_filter_formas_input",
+    )
+    apply_col, clear_col = st.columns(2)
+    with apply_col:
+        if st.button("Aplicar filtros", key="sei_cadastro_todos_filter_apply", type="primary", use_container_width=True):
+            st.session_state.sei_filters_todos = {"formas_acesso": selected_formas, "orgaos": selected_orgaos}
+            st.rerun()
+    with clear_col:
+        if st.button("Limpar filtros", key="sei_cadastro_todos_filter_clear", use_container_width=True):
+            st.session_state.sei_filters_todos = {"formas_acesso": [], "orgaos": []}
             st.rerun()
 
 
 @st.dialog("Editar processo administrativo")
 def show_edit_sei_process_dialog(index: int) -> None:
     item = st.session_state.sei_processes[index]
+
+    edit_org_options = st.session_state.sei_orgaos
+    edit_org = st.selectbox(
+        "Órgão",
+        edit_org_options,
+        index=edit_org_options.index(item["org"]) if item["org"] in edit_org_options else 0,
+        key=f"sei_edit_org_{index}",
+    )
+
+    edit_forma_acesso = st.selectbox(
+        "Forma de acesso",
+        SEI_FORMAS_ACESSO,
+        index=SEI_FORMAS_ACESSO.index(item["forma_acesso"]) if item.get("forma_acesso") in SEI_FORMAS_ACESSO else 0,
+        key=f"sei_edit_forma_{index}",
+    )
+
+    edit_org_credenciais: list[dict] = []
+    edit_link_labels: list[str] = []
+    edit_link_text = ""
+    if edit_forma_acesso == "Restrito":
+        edit_org_credenciais = credenciais_com_link_do_orgao(edit_org)
+        edit_link_labels = ["(nenhum)"] + [credencial_link_label(c) for c in edit_org_credenciais]
+        current_link = item.get("link") or ""
+        edit_link_links = [c["link"] for c in edit_org_credenciais]
+        edit_link_default_index = edit_link_links.index(current_link) + 1 if current_link in edit_link_links else 0
+
+        edit_link_select_col, edit_link_add_col = st.columns([5, 1])
+        with edit_link_select_col:
+            edit_link_choice = st.selectbox(
+                "Link de acesso", edit_link_labels, index=edit_link_default_index, key=f"sei_edit_link_choice_{index}"
+            )
+        with edit_link_add_col:
+            st.markdown("<div style='height:1.6rem'></div>", unsafe_allow_html=True)
+            if st.button(
+                "+", key=f"sei_edit_link_add_{index}", help="Cadastrar link de acesso em Links e E-mails", use_container_width=True
+            ):
+                st.session_state.active_module = "Links e E-mails"
+                st.rerun()
+        if not edit_org_credenciais:
+            st.caption(f"Nenhum link cadastrado para {edit_org} ainda. Use o botão \"+\" para cadastrar um em Links e E-mails.")
+    else:
+        edit_link_text = st.text_input(
+            "Link de acesso", value=item.get("link") or "", placeholder="https://sei.orgao.gov.br/... (opcional)",
+            key=f"sei_edit_link_text_{index}",
+        )
+
     with st.form("sei_edit_form"):
         edit_number = st.text_input("Número do processo", value=item["number"])
-        edit_org = st.selectbox("Órgão", SEI_ORGAOS, index=SEI_ORGAOS.index(item["org"]) if item["org"] in SEI_ORGAOS else 0)
-        edit_interessado = st.text_input("Interessado / Cliente", value=item.get("interessado") or "")
+        edit_interessado = st.text_input("Interessado", value=item.get("interessado") or "")
         edit_responsavel = st.text_input("Responsável", value=item.get("responsavel") or "")
         edit_sistema_origem = st.text_input("Sistema de origem", value=item.get("sistema_origem") or "SEI")
-        edit_tipo_col, edit_forma_col = st.columns(2)
-        with edit_tipo_col:
-            edit_tipo = st.selectbox(
-                "Tipo", SEI_TIPOS, index=SEI_TIPOS.index(item["tipo"]) if item.get("tipo") in SEI_TIPOS else 0
-            )
-        with edit_forma_col:
-            edit_forma_acesso = st.selectbox(
-                "Forma de acesso",
-                SEI_FORMAS_ACESSO,
-                index=SEI_FORMAS_ACESSO.index(item["forma_acesso"]) if item.get("forma_acesso") in SEI_FORMAS_ACESSO else 0,
-            )
         save_col, remove_col = st.columns(2)
         with save_col:
             save = st.form_submit_button("Salvar alterações", use_container_width=True)
@@ -1253,6 +2456,13 @@ def show_edit_sei_process_dialog(index: int) -> None:
         ):
             st.warning("Esse processo já está cadastrado para este órgão.")
         else:
+            if edit_forma_acesso == "Restrito":
+                edit_link_choice_index = edit_link_labels.index(edit_link_choice)
+                edit_resolved_link = (
+                    "" if edit_link_choice_index == 0 else edit_org_credenciais[edit_link_choice_index - 1]["link"]
+                )
+            else:
+                edit_resolved_link = edit_link_text.strip()
             st.session_state.sei_processes[index] = {
                 **item,
                 "number": edit_number.strip(),
@@ -1260,13 +2470,287 @@ def show_edit_sei_process_dialog(index: int) -> None:
                 "interessado": edit_interessado.strip(),
                 "responsavel": edit_responsavel.strip(),
                 "sistema_origem": edit_sistema_origem.strip() or "SEI",
-                "tipo": edit_tipo,
                 "forma_acesso": edit_forma_acesso,
+                "link": edit_resolved_link,
             }
             st.success("Processo atualizado.")
             st.rerun()
     if remove:
         st.session_state.sei_processes.pop(index)
+        st.success("Processo removido.")
+        st.rerun()
+
+
+@st.dialog("Filtrar processos TCU")
+def show_tcu_filter_dialog() -> None:
+    filters = st.session_state.setdefault("tcu_filters", {"tipos": []})
+    tipo_options = sorted({p.get("tipo") for p in st.session_state.tcu_processes if p.get("tipo")})
+    selected_tipos = st.multiselect(
+        "Tipo", tipo_options, default=[t for t in filters["tipos"] if t in tipo_options], key="tcu_filter_tipos_input"
+    )
+    apply_col, clear_col = st.columns(2)
+    with apply_col:
+        if st.button("Aplicar filtros", key="tcu_filter_apply", type="primary", use_container_width=True):
+            st.session_state.tcu_filters = {"tipos": selected_tipos}
+            st.rerun()
+    with clear_col:
+        if st.button("Limpar filtros", key="tcu_filter_clear", use_container_width=True):
+            st.session_state.tcu_filters = {"tipos": []}
+            st.rerun()
+
+
+@st.dialog("Filtrar processos")
+def show_painel_proc_filter_dialog() -> None:
+    filters = st.session_state.setdefault("painel_proc_filters", {"sistemas": [], "responsaveis": []})
+    sistema_options = ["DJe", "SEI", "TCU"]
+    selected_sistemas = st.multiselect(
+        "Sistema",
+        sistema_options,
+        default=[s for s in filters["sistemas"] if s in sistema_options],
+        key="painel_proc_filter_sistemas_input",
+    )
+    responsavel_options = sorted({
+        item.get("responsavel") or "não informado"
+        for item in st.session_state.processes + st.session_state.sei_processes + st.session_state.tcu_processes
+    })
+    selected_responsaveis = st.multiselect(
+        "Responsável",
+        responsavel_options,
+        default=[r for r in filters["responsaveis"] if r in responsavel_options],
+        key="painel_proc_filter_responsaveis_input",
+    )
+    apply_col, clear_col = st.columns(2)
+    with apply_col:
+        if st.button("Aplicar filtros", key="painel_proc_filter_apply", type="primary", use_container_width=True):
+            st.session_state.painel_proc_filters = {"sistemas": selected_sistemas, "responsaveis": selected_responsaveis}
+            st.rerun()
+    with clear_col:
+        if st.button("Limpar filtros", key="painel_proc_filter_clear", use_container_width=True):
+            st.session_state.painel_proc_filters = {"sistemas": [], "responsaveis": []}
+            st.rerun()
+
+
+@st.dialog("Filtrar CNPJs")
+def show_painel_cnpj_filter_dialog() -> None:
+    filters = st.session_state.setdefault("painel_cnpj_filters", {"responsaveis": []})
+    responsavel_options = sorted({item.get("responsavel") or "não informado" for item in st.session_state.monitored_cnpjs})
+    selected_responsaveis = st.multiselect(
+        "Responsável",
+        responsavel_options,
+        default=[r for r in filters["responsaveis"] if r in responsavel_options],
+        key="painel_cnpj_filter_responsaveis_input",
+    )
+    apply_col, clear_col = st.columns(2)
+    with apply_col:
+        if st.button("Aplicar filtros", key="painel_cnpj_filter_apply", type="primary", use_container_width=True):
+            st.session_state.painel_cnpj_filters = {"responsaveis": selected_responsaveis}
+            st.rerun()
+    with clear_col:
+        if st.button("Limpar filtros", key="painel_cnpj_filter_clear", use_container_width=True):
+            st.session_state.painel_cnpj_filters = {"responsaveis": []}
+            st.rerun()
+
+
+DJE_BULK_CONSULTA_CONCORRENCIA = 5  # nº de consultas simultâneas — bem abaixo do limite de 120/min do DataJud
+
+
+@st.dialog("Consultar todos os processos (DJe)")
+def show_painel_consultar_todos_proc_dialog(numeros: list[str]) -> None:
+    total = len(numeros)
+    resultado_key = "painel_consultar_todos_proc_resultado"
+
+    def _mostrar_resultado(sucesso: int, erros: list[tuple[str, str]]) -> None:
+        if sucesso:
+            st.success(f"{sucesso} de {total} processo(s) consultado(s) com sucesso.")
+        for numero, motivo in erros:
+            st.warning(f"{numero}: {motivo}")
+        if st.button("Fechar", use_container_width=True, key="fechar_consultar_todos_proc"):
+            st.session_state.pop(resultado_key, None)
+            st.rerun()
+
+    resultado = st.session_state.get(resultado_key)
+    if resultado is not None:
+        _mostrar_resultado(*resultado)
+        return
+
+    st.markdown(
+        f"Isso vai consultar **{total} processo(s)** no DataJud e no DJEN, até "
+        f"{DJE_BULK_CONSULTA_CONCORRENCIA} de cada vez (dentro do limite de 120 requisições/min do "
+        "DataJud). Pode levar alguns minutos, dependendo da resposta das APIs."
+    )
+    if st.button("Consultar todos", type="primary", use_container_width=True, key="confirmar_consultar_todos_proc"):
+        progress = st.progress(0.0)
+        status_placeholder = st.empty()
+        erros: list[tuple[str, str]] = []
+        sucesso = 0
+        concluidos = 0
+        parsed_por_numero: dict[str, NumeroProcessoCNJ] = {}
+        for numero in numeros:
+            try:
+                parsed_por_numero[numero] = NumeroProcessoCNJ.parse(numero)
+            except ValueError:
+                erros.append((numero, "Número CNJ inválido."))
+                concluidos += 1
+
+        # Só a busca (sem tocar em st.session_state) roda nas threads; a gravação do
+        # resultado acontece aqui embaixo, sempre na thread principal.
+        with ThreadPoolExecutor(max_workers=DJE_BULK_CONSULTA_CONCORRENCIA) as executor:
+            futures = {
+                executor.submit(_fetch_dje_processo_dados, parsed): numero
+                for numero, parsed in parsed_por_numero.items()
+            }
+            for future in as_completed(futures):
+                numero = futures[future]
+                dados = future.result()
+                obteve_dados, mensagens_erro = _aplicar_dje_processo_dados(numero, dados)
+                if obteve_dados:
+                    sucesso += 1
+                if mensagens_erro:
+                    erros.append((numero, "; ".join(mensagens_erro)))
+                concluidos += 1
+                status_placeholder.caption(f"Consultando... {concluidos} de {total} concluído(s).")
+                progress.progress(concluidos / total)
+        status_placeholder.empty()
+        st.session_state[resultado_key] = (sucesso, erros)
+        _mostrar_resultado(sucesso, erros)
+
+
+@st.dialog("Consultar todos os CNPJs (DJe)")
+def show_painel_consultar_todos_cnpj_dialog(items: list[dict]) -> None:
+    total = len(items)
+    resultado_key = "painel_consultar_todos_cnpj_resultado"
+
+    def _mostrar_resultado(sucesso: int, erros: list[tuple[str, str]]) -> None:
+        if sucesso:
+            st.success(f"{sucesso} de {total} CNPJ(s) consultado(s) com sucesso.")
+        for cnpj_label, motivo in erros:
+            st.warning(f"{cnpj_label}: {motivo}")
+        if st.button("Fechar", use_container_width=True, key="fechar_consultar_todos_cnpj"):
+            st.session_state.pop(resultado_key, None)
+            st.rerun()
+
+    resultado = st.session_state.get(resultado_key)
+    if resultado is not None:
+        _mostrar_resultado(*resultado)
+        return
+
+    st.markdown(
+        f"Isso vai consultar **{total} CNPJ(s)** no DJEN, até {DJE_BULK_CONSULTA_CONCORRENCIA} de cada "
+        "vez. Pode levar alguns minutos, dependendo da resposta da API."
+    )
+    if st.button("Consultar todos", type="primary", use_container_width=True, key="confirmar_consultar_todos_cnpj"):
+        progress = st.progress(0.0)
+        status_placeholder = st.empty()
+        erros: list[tuple[str, str]] = []
+        sucesso = 0
+        concluidos = 0
+        # Só a busca (sem tocar em st.session_state) roda nas threads; a gravação do
+        # resultado acontece aqui embaixo, sempre na thread principal.
+        with ThreadPoolExecutor(max_workers=DJE_BULK_CONSULTA_CONCORRENCIA) as executor:
+            futures = {executor.submit(_fetch_dje_cnpj_dados, item): item for item in items}
+            for future in as_completed(futures):
+                item = futures[future]
+                dados = future.result()
+                obteve_dados, mensagens_erro = _aplicar_dje_cnpj_dados(item["cnpj"], dados)
+                if obteve_dados:
+                    sucesso += 1
+                if mensagens_erro:
+                    erros.append((format_cnpj_br(item["cnpj"]), "; ".join(mensagens_erro)))
+                concluidos += 1
+                status_placeholder.caption(f"Consultando... {concluidos} de {total} concluído(s).")
+                progress.progress(concluidos / total)
+        status_placeholder.empty()
+        st.session_state[resultado_key] = (sucesso, erros)
+        _mostrar_resultado(sucesso, erros)
+
+
+@st.dialog("Cadastrar processo TCU")
+def show_add_tcu_process_dialog() -> None:
+    with st.form("tcu_form", clear_on_submit=True):
+        tcu_number = st.text_input("Número do processo (TC)", placeholder="Ex.: 012.345/2024-3", key="tcu_number")
+        tcu_interessado = st.text_input("Interessado", placeholder="Ex.: Federação X", key="tcu_interessado")
+        tcu_responsavel = st.text_input("Responsável", placeholder="Ex.: Advogado(a) responsável", key="tcu_responsavel")
+        tcu_tipo = st.selectbox("Tipo", TCU_TIPOS, key="tcu_tipo")
+        tcu_conecta_url_input = st.text_input(
+            "Link do Conecta TCU (opcional, só se precisar sobrepor o link padrão)",
+            placeholder="Ex.: https://conecta-tcu.apps.tcu.gov.br/tvp/12345678",
+            help=(
+                "Por padrão o botão \"Consultar\" já monta o link do Conecta TCU sozinho a partir do número do "
+                "processo. Preencha aqui só se precisar apontar para uma URL diferente."
+            ),
+            key="tcu_conecta_url_field",
+        )
+        tcu_add = st.form_submit_button("Cadastrar processo", use_container_width=True)
+    if tcu_add:
+        try:
+            numero_normalizado = normalizar_numero_tcu(tcu_number)
+        except ValueError as exc:
+            st.warning(str(exc))
+        else:
+            if any(p["number"] == numero_normalizado for p in st.session_state.tcu_processes):
+                st.warning("Esse processo já está cadastrado.")
+            else:
+                st.session_state.tcu_processes.append({
+                    "number": numero_normalizado,
+                    "tipo": tcu_tipo,
+                    "interessado": tcu_interessado.strip(),
+                    "responsavel": tcu_responsavel.strip(),
+                    "conecta_url": tcu_conecta_url_input.strip(),
+                    "movements": [],
+                    "movements_conecta": [],
+                    "last_query": None,
+                })
+                st.success("Processo cadastrado.")
+                st.rerun()
+
+
+@st.dialog("Editar processo TCU")
+def show_edit_tcu_process_dialog(index: int) -> None:
+    item = st.session_state.tcu_processes[index]
+    with st.form("tcu_edit_form"):
+        edit_number = st.text_input("Número do processo (TC)", value=item["number"])
+        edit_interessado = st.text_input("Interessado", value=item.get("interessado") or "")
+        edit_responsavel = st.text_input("Responsável", value=item.get("responsavel") or "")
+        edit_tipo = st.selectbox(
+            "Tipo", TCU_TIPOS, index=TCU_TIPOS.index(item["tipo"]) if item.get("tipo") in TCU_TIPOS else 0
+        )
+        edit_conecta_url = st.text_input(
+            "Link do Conecta TCU (opcional, só se precisar sobrepor o link padrão)",
+            value=item.get("conecta_url") or "",
+            placeholder="Ex.: https://conecta-tcu.apps.tcu.gov.br/tvp/12345678",
+            help=(
+                "Por padrão o botão \"Consultar\" já monta o link do Conecta TCU sozinho a partir do número do "
+                "processo. Preencha aqui só se precisar apontar para uma URL diferente."
+            ),
+        )
+        save_col, remove_col = st.columns(2)
+        with save_col:
+            save = st.form_submit_button("Salvar alterações", use_container_width=True)
+        with remove_col:
+            remove = st.form_submit_button("Remover processo", use_container_width=True)
+    if save:
+        try:
+            numero_normalizado = normalizar_numero_tcu(edit_number)
+        except ValueError as exc:
+            st.warning(str(exc))
+        else:
+            if any(
+                i != index and p["number"] == numero_normalizado for i, p in enumerate(st.session_state.tcu_processes)
+            ):
+                st.warning("Esse processo já está cadastrado.")
+            else:
+                st.session_state.tcu_processes[index] = {
+                    **item,
+                    "number": numero_normalizado,
+                    "interessado": edit_interessado.strip(),
+                    "responsavel": edit_responsavel.strip(),
+                    "tipo": edit_tipo,
+                    "conecta_url": edit_conecta_url.strip(),
+                }
+                st.success("Processo atualizado.")
+                st.rerun()
+    if remove:
+        st.session_state.tcu_processes.pop(index)
         st.success("Processo removido.")
         st.rerun()
 
@@ -1294,8 +2778,10 @@ MONITORAMENTO_INFO = {
         "partir dessa consulta, já que cada órgão publica em seu próprio SEI."
     ),
     "TCU": (
-        "Conector aguardando credenciais oficiais do Tribunal de Contas da União. Quando integrado, buscará "
-        "acórdãos, processos e comunicações de interesse do escritório."
+        "Não exige credencial: a consulta usa a busca pública do TCU por número de processo. As movimentações "
+        "são preenchidas automaticamente a partir dos e-mails do serviço \"Acompanhamento processual (Push)\" do "
+        "próprio TCU, na conta Google conectada em Autenticações — o cadastro do processo no Push, porém, precisa "
+        "ser feito uma vez pelo usuário no site do TCU, com login gov.br, apontando para esse mesmo e-mail."
     ),
 }
 
@@ -1446,12 +2932,21 @@ with st.sidebar:
     st.divider()
 
     if st.button(
-        ":material/key: Links e Autenticações",
+        ":material/mail: Links e E-mails",
         key="nav_links_button",
-        type="primary" if _active_module == "Links e Autenticações" else "secondary",
+        type="primary" if _active_module == "Links e E-mails" else "secondary",
         use_container_width=True,
     ):
-        st.session_state.active_module = "Links e Autenticações"
+        st.session_state.active_module = "Links e E-mails"
+        st.rerun()
+
+    if st.button(
+        ":material/key: Autenticações",
+        key="nav_auth_button",
+        type="primary" if _active_module == "Autenticações" else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state.active_module = "Autenticações"
         st.rerun()
 
     if st.button(":material/settings: Configurações", key="nav_settings_button", use_container_width=True):
@@ -1464,6 +2959,8 @@ with st.sidebar:
 if "process_number" not in st.session_state:
     st.session_state.process_number = st.session_state.processes[0]["number"] if st.session_state.processes else ""
 process_number = st.session_state.process_number
+
+render_alerts_panel()
 
 if module is None:
     usuario_nome = st.session_state.firm_profile.get("usuario", "").strip()
@@ -1480,8 +2977,6 @@ if module is None:
     id_card_office = html.escape(profile.get("nome") or "Escritório")
     id_card_name = html.escape(profile.get("usuario") or "Usuário não informado")
     id_card_email = html.escape(profile.get("email") or "e-mail não informado")
-    id_card_endereco = html.escape(profile.get("endereco") or "endereço não informado")
-    id_card_telefone = html.escape(profile.get("telefone") or "telefone não informado")
 
     id_card_photo_html = (
         f'<img src="{profile["logo"]}" class="id-card-photo" />' if profile.get("logo") else '<div class="id-card-photo">GJ</div>'
@@ -1495,8 +2990,7 @@ if module is None:
                 '<div class="id-card-info">'
                 f'<div class="id-card-username">{id_card_name}</div>'
                 f'<div class="id-card-office">{id_card_office}</div>'
-                f'<div class="id-card-contact">{id_card_email} · {id_card_telefone}</div>'
-                f'<div class="id-card-contact">{id_card_endereco}</div>'
+                f'<div class="id-card-contact">{id_card_email}</div>'
                 '</div></div>',
                 unsafe_allow_html=True,
             )
@@ -1525,15 +3019,32 @@ elif module == "Painel Geral":
 
     st.markdown('<div class="eyebrow">TODOS OS ITENS MONITORADOS</div>', unsafe_allow_html=True)
 
+    def _tcu_paste_import_widget(proc: dict) -> None:
+        with st.expander(
+            "Colar histórico do Conecta TCU",
+            expanded=not proc.get("movements_conecta"),
+        ):
+            st.caption(
+                "Na aba HISTÓRICO do Conecta TCU, selecione e copie as linhas do processo e cole abaixo. "
+                "Formato esperado por linha: \"DD/MM/AAAA HH:MM:SS - descrição\"."
+            )
+            tcu_conecta_texto = st.text_area(
+                "Colar histórico",
+                height=150,
+                key=f"painel_tcu_conecta_paste_{proc['number']}",
+                label_visibility="collapsed",
+            )
+            if st.button("Importar", key=f"painel_tcu_conecta_import_{proc['number']}"):
+                tcu_conecta_novos = importar_historico_conecta_tcu(proc, tcu_conecta_texto)
+                if tcu_conecta_novos:
+                    st.success(f"{tcu_conecta_novos} movimentação(ões) nova(s) importada(s).")
+                else:
+                    st.warning("Nenhuma movimentação nova reconhecida nesse texto.")
+
     def _abrir_dialog_painel_processo(kind: str, item: dict) -> None:
         if kind == "DJe":
             show_movimentacoes_dialog(
                 f"{item['label']} · {item['number']}",
-                nav_state={
-                    "consulta_select_process": f"{item['label']} · {item['number']}",
-                    "_nav_platform": "DJe",
-                    "_nav_dje_subtab": "Processos",
-                },
                 ultima_atualizacao=st.session_state.query_timestamps.get(item["number"]),
                 consultar_action=lambda numero=item["number"]: consultar_dje_processo(numero),
                 refresh=lambda numero=item["number"]: {
@@ -1549,112 +3060,249 @@ elif module == "Painel Geral":
                 },
                 default_source="Movimentações (DataJud)",
             )
+        elif kind == "TCU":
+            _tcu_conectado_painel = google_account_connected()
+            show_movimentacoes_dialog(
+                f"TCU · {item['number']}",
+                ultima_atualizacao=item.get("last_query"),
+                consultar_link=item.get("conecta_url") or tcu_conecta_url(item["number"]),
+                consultar_proc=item,
+                refresh=lambda proc=item: {
+                    "sources": {
+                        "Push": movimentacoes_tcu_processo(proc),
+                        "Conecta TCU": movimentacoes_tcu_conecta(proc),
+                    },
+                    "ultima_atualizacao": proc.get("last_query"),
+                },
+                sources={
+                    "Push": movimentacoes_tcu_processo(item),
+                    "Conecta TCU": movimentacoes_tcu_conecta(item),
+                },
+                default_source="Push",
+                source_widgets={"Conecta TCU": lambda proc=item: _tcu_paste_import_widget(proc)},
+                sincronizar_action=sincronizar_tcu_push,
+                sincronizar_disabled=not _tcu_conectado_painel,
+                sincronizar_help=(
+                    "Lê a caixa do Gmail conectado em busca de e-mails de push do TCU."
+                    if _tcu_conectado_painel else "Conecte sua conta Google em Autenticações primeiro."
+                ),
+                busca_publica_url=tcu_pesquisa_publica_url(item["number"]),
+            )
         else:
             show_movimentacoes_dialog(
                 f"{item['org']} · {item['number']}",
                 movimentacoes_sei_processo(item),
-                nav_state={
-                    "_nav_platform": "SEI",
-                    "_nav_sei_org": item["org"],
-                    "_nav_sei_process": item["number"],
-                },
                 ultima_atualizacao=item.get("last_query"),
-                consultar_link=(find_credencial_for_processo(item["number"]) or {}).get("link"),
+                consultar_link=sei_consultar_link(item),
                 consultar_proc=item,
             )
 
     painel_tab_processos, painel_tab_cnpj = st.tabs(["Processos", "CNPJ"])
 
     with painel_tab_processos:
-        if not st.session_state.processes and not st.session_state.sei_processes:
+        st.session_state.setdefault("painel_proc_filters", {"sistemas": [], "responsaveis": []})
+        if not st.session_state.processes and not st.session_state.sei_processes and not st.session_state.tcu_processes:
             status("Nenhum processo monitorado ainda. Cadastre um processo para começar.", "warn")
         else:
-            painel_proc_refs = [("DJe", item) for item in st.session_state.processes] + [
-                ("SEI", item) for item in st.session_state.sei_processes
-            ]
-            painel_proc_rows = [
-                {
-                    "Sistema": kind,
-                    "Órgão": resolve_orgao_label(item["number"]) if kind == "DJe" else item["org"],
-                    "Referência": item["label"] if kind == "DJe" else (item.get("interessado") or "não informado"),
-                    "Número do processo": item["number"],
-                    "Responsável": item.get("responsavel") or "não informado",
-                }
-                for kind, item in painel_proc_refs
-            ]
-            selection = st.dataframe(
-                painel_proc_rows,
-                use_container_width=True,
-                hide_index=True,
-                on_select="rerun",
-                selection_mode="single-row",
-                key="painel_proc_table",
+            painel_proc_refs = (
+                [("DJe", item) for item in st.session_state.processes]
+                + [("SEI", item) for item in st.session_state.sei_processes]
+                + [("TCU", item) for item in st.session_state.tcu_processes]
             )
-            st.caption("Selecione uma linha para ver as últimas movimentações.")
-            selected_rows = selection.get("selection", {}).get("rows", []) if selection else []
-            if st.button(
-                "Ver histórico de movimentações",
-                key="painel_proc_ver_historico",
-                disabled=not selected_rows,
-                use_container_width=True,
-            ):
-                kind, item = painel_proc_refs[selected_rows[0]]
-                _abrir_dialog_painel_processo(kind, item)
+
+            painel_proc_search_col, painel_proc_hist_col = st.columns([3, 2])
+            with painel_proc_search_col:
+                st.markdown('<div class="eyebrow">Buscar processo:</div>', unsafe_allow_html=True)
+                painel_proc_search = st.text_input(
+                    "Buscar processo",
+                    placeholder="Buscar por número, interessado, sistema ou órgão",
+                    key="painel_proc_search",
+                    label_visibility="collapsed",
+                )
+
+            painel_proc_toolbar = st.container(key="painel_proc_toolbar")
+
+            painel_proc_filters = st.session_state["painel_proc_filters"]
+            filtered_proc_refs = painel_proc_refs
+            if painel_proc_filters["sistemas"]:
+                filtered_proc_refs = [(k, item) for k, item in filtered_proc_refs if k in painel_proc_filters["sistemas"]]
+            if painel_proc_filters["responsaveis"]:
+                filtered_proc_refs = [
+                    (k, item) for k, item in filtered_proc_refs
+                    if (item.get("responsavel") or "não informado") in painel_proc_filters["responsaveis"]
+                ]
+            if painel_proc_search.strip():
+                painel_proc_term = painel_proc_search.strip().lower()
+                filtered_proc_refs = [
+                    (k, item) for k, item in filtered_proc_refs
+                    if painel_proc_term in item["number"].lower()
+                    or painel_proc_term in (item["label"] if k == "DJe" else (item.get("interessado") or "")).lower()
+                    or painel_proc_term in k.lower()
+                    or painel_proc_term in (
+                        resolve_orgao_label(item["number"]) if k == "DJe"
+                        else "TCU" if k == "TCU"
+                        else item["org"]
+                    ).lower()
+                ]
+
+            painel_proc_dje_numeros = [item["number"] for k, item in filtered_proc_refs if k == "DJe"]
+
+            with painel_proc_toolbar:
+                if st.button(":material/filter_alt:", key="toolbar_filter_painel_proc", help="Filtrar"):
+                    show_painel_proc_filter_dialog()
+                if st.button(
+                    ":material/sync:",
+                    key="toolbar_consultar_todos_painel_proc",
+                    help="Consultar todos os processos DJe filtrados no DataJud/DJEN",
+                    disabled=not painel_proc_dje_numeros,
+                ):
+                    st.session_state.pop("painel_consultar_todos_proc_resultado", None)
+                    show_painel_consultar_todos_proc_dialog(painel_proc_dje_numeros)
+
+            selected_rows: list[int] = []
+            if not filtered_proc_refs:
+                status("Nenhum processo encontrado para os filtros selecionados.")
+            else:
+                painel_proc_rows = [
+                    {
+                        "Número do processo": item["number"],
+                        "Interessado": item["label"] if kind == "DJe" else (item.get("interessado") or "não informado"),
+                        "Sistema": kind,
+                        "Órgão": (
+                            resolve_orgao_label(item["number"]) if kind == "DJe"
+                            else "TCU" if kind == "TCU"
+                            else item["org"]
+                        ),
+                        "Responsável": item.get("responsavel") or "não informado",
+                        "Última consulta": ultima_consulta_label(
+                            st.session_state.query_timestamps.get(item["number"]) if kind == "DJe" else item.get("last_query")
+                        ),
+                    }
+                    for kind, item in filtered_proc_refs
+                ]
+                painel_proc_styler = pd.DataFrame(painel_proc_rows).style.apply(_ultima_consulta_row_style, axis=1)
+                selection = st.dataframe(
+                    painel_proc_styler,
+                    use_container_width=True,
+                    hide_index=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key="painel_proc_table",
+                )
+                selected_rows = selection.get("selection", {}).get("rows", []) if selection else []
+
+            with painel_proc_hist_col:
+                st.markdown('<div class="eyebrow">Ver histórico do processo:</div>', unsafe_allow_html=True)
+                if st.button(
+                    "Consultar",
+                    key="painel_proc_ver_historico",
+                    type="primary",
+                    disabled=not selected_rows,
+                    use_container_width=True,
+                ):
+                    kind, item = filtered_proc_refs[selected_rows[0]]
+                    _abrir_dialog_painel_processo(kind, item)
 
     with painel_tab_cnpj:
+        st.session_state.setdefault("painel_cnpj_filters", {"responsaveis": []})
         if not st.session_state.monitored_cnpjs:
             status("Nenhum CNPJ monitorado ainda. Cadastre um CNPJ para começar.", "warn")
         else:
-            painel_cnpj_rows = [
-                {
-                    "Sistema": "DJe",
-                    "Razão Social": item["label"],
-                    "CNPJ": format_cnpj_br(item["cnpj"]),
-                    "Cliente": item.get("cliente") or "não informado",
-                    "Responsável": item.get("responsavel") or "não informado",
-                }
-                for item in st.session_state.monitored_cnpjs
-            ]
-            cnpj_selection = st.dataframe(
-                painel_cnpj_rows,
-                use_container_width=True,
-                hide_index=True,
-                on_select="rerun",
-                selection_mode="single-row",
-                key="painel_cnpj_table",
-            )
-            st.caption("Selecione uma linha para ver as últimas movimentações.")
-            cnpj_selected_rows = cnpj_selection.get("selection", {}).get("rows", []) if cnpj_selection else []
-            if st.button(
-                "Ver histórico de movimentações",
-                key="painel_cnpj_ver_historico",
-                disabled=not cnpj_selected_rows,
-                use_container_width=True,
-            ):
-                item = st.session_state.monitored_cnpjs[cnpj_selected_rows[0]]
-                show_movimentacoes_dialog(
-                    item["label"],
-                    nav_state={
-                        "consulta_select_cnpj": f"{item['label']} · {format_cnpj_br(item['cnpj'])}",
-                        "_nav_platform": "DJe",
-                        "_nav_dje_subtab": "CNPJ",
-                    },
-                    ultima_atualizacao=st.session_state.cnpj_query_timestamps.get(item["cnpj"]),
-                    consultar_action=lambda cnpj_item=item: consultar_dje_cnpj(cnpj_item),
-                    refresh=lambda cnpj_item=item: {
-                        "sources": {
-                            "Movimentações (DJe)": [],
-                            "Diário (DJEN)": movimentacoes_cnpj(cnpj_item["cnpj"]),
-                        },
-                        "ultima_atualizacao": st.session_state.cnpj_query_timestamps.get(cnpj_item["cnpj"]),
-                    },
-                    sources={
-                        "Movimentações (DJe)": [],
-                        "Diário (DJEN)": movimentacoes_cnpj(item["cnpj"]),
-                    },
-                    default_source="Diário (DJEN)",
-                    unavailable_sources={"Movimentações (DJe)": DJE_CNPJ_NOT_IMPLEMENTED_MSG},
+            painel_cnpj_search_col, painel_cnpj_hist_col = st.columns([3, 2])
+            with painel_cnpj_search_col:
+                st.markdown('<div class="eyebrow">Buscar CNPJ:</div>', unsafe_allow_html=True)
+                painel_cnpj_search = st.text_input(
+                    "Buscar CNPJ",
+                    placeholder="Buscar por CNPJ, razão social ou interessado",
+                    key="painel_cnpj_search",
+                    label_visibility="collapsed",
                 )
+
+            painel_cnpj_toolbar = st.container(key="painel_cnpj_toolbar")
+
+            painel_cnpj_filters = st.session_state["painel_cnpj_filters"]
+            filtered_cnpj_items = st.session_state.monitored_cnpjs
+            if painel_cnpj_filters["responsaveis"]:
+                filtered_cnpj_items = [
+                    item for item in filtered_cnpj_items
+                    if (item.get("responsavel") or "não informado") in painel_cnpj_filters["responsaveis"]
+                ]
+            if painel_cnpj_search.strip():
+                painel_cnpj_term = painel_cnpj_search.strip().lower()
+                filtered_cnpj_items = [
+                    item for item in filtered_cnpj_items
+                    if painel_cnpj_term in format_cnpj_br(item["cnpj"]).lower()
+                    or painel_cnpj_term in item["cnpj"].lower()
+                    or painel_cnpj_term in item["label"].lower()
+                    or painel_cnpj_term in (item.get("interessado") or "").lower()
+                ]
+
+            with painel_cnpj_toolbar:
+                if st.button(":material/filter_alt:", key="toolbar_filter_painel_cnpj", help="Filtrar"):
+                    show_painel_cnpj_filter_dialog()
+                if st.button(
+                    ":material/sync:",
+                    key="toolbar_consultar_todos_painel_cnpj",
+                    help="Consultar todos os CNPJs filtrados no DJEN",
+                    disabled=not filtered_cnpj_items,
+                ):
+                    st.session_state.pop("painel_consultar_todos_cnpj_resultado", None)
+                    show_painel_consultar_todos_cnpj_dialog(filtered_cnpj_items)
+
+            cnpj_selected_rows: list[int] = []
+            if not filtered_cnpj_items:
+                status("Nenhum CNPJ encontrado para os filtros selecionados.")
+            else:
+                painel_cnpj_rows = [
+                    {
+                        "CNPJ": format_cnpj_br(item["cnpj"]),
+                        "Interessado": item.get("interessado") or "não informado",
+                        "Sistema": "DJe",
+                        "Responsável": item.get("responsavel") or "não informado",
+                        "Razão Social": item["label"],
+                        "Última consulta": ultima_consulta_label(st.session_state.cnpj_query_timestamps.get(item["cnpj"])),
+                    }
+                    for item in filtered_cnpj_items
+                ]
+                painel_cnpj_styler = pd.DataFrame(painel_cnpj_rows).style.apply(_ultima_consulta_row_style, axis=1)
+                cnpj_selection = st.dataframe(
+                    painel_cnpj_styler,
+                    use_container_width=True,
+                    hide_index=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key="painel_cnpj_table",
+                )
+                cnpj_selected_rows = cnpj_selection.get("selection", {}).get("rows", []) if cnpj_selection else []
+
+            with painel_cnpj_hist_col:
+                st.markdown('<div class="eyebrow">Ver histórico do CNPJ:</div>', unsafe_allow_html=True)
+                if st.button(
+                    "Consultar",
+                    key="painel_cnpj_ver_historico",
+                    type="primary",
+                    disabled=not cnpj_selected_rows,
+                    use_container_width=True,
+                ):
+                    item = filtered_cnpj_items[cnpj_selected_rows[0]]
+                    show_movimentacoes_dialog(
+                        item["label"],
+                        ultima_atualizacao=st.session_state.cnpj_query_timestamps.get(item["cnpj"]),
+                        consultar_action=lambda cnpj_item=item: consultar_dje_cnpj(cnpj_item),
+                        refresh=lambda cnpj_item=item: {
+                            "sources": {
+                                "Movimentações (DJe)": [],
+                                "Diário (DJEN)": movimentacoes_cnpj(cnpj_item["cnpj"]),
+                            },
+                            "ultima_atualizacao": st.session_state.cnpj_query_timestamps.get(cnpj_item["cnpj"]),
+                        },
+                        sources={
+                            "Movimentações (DJe)": [],
+                            "Diário (DJEN)": movimentacoes_cnpj(item["cnpj"]),
+                        },
+                        default_source="Diário (DJEN)",
+                        unavailable_sources={"Movimentações (DJe)": DJE_CNPJ_NOT_IMPLEMENTED_MSG},
+                    )
 
 elif module == "Monitoramento":
     st.markdown(
@@ -1667,16 +3315,10 @@ elif module == "Monitoramento":
         unsafe_allow_html=True,
     )
 
-    _nav_platform_target = st.session_state.pop("_nav_platform", None)
-    mon_tab_dje, mon_tab_det, mon_tab_sei, mon_tab_tcu = st.tabs(
-        PLATAFORMAS, default=_nav_platform_target or PLATAFORMAS[0]
-    )
+    mon_tab_dje, mon_tab_det, mon_tab_sei, mon_tab_tcu = st.tabs(PLATAFORMAS)
 
     with mon_tab_dje:
-        _nav_dje_subtab_target = st.session_state.pop("_nav_dje_subtab", None)
-        mon_cons_tab_cnpj, mon_cons_tab_cnj = st.tabs(
-            ["CNPJ", "Processos"], default=_nav_dje_subtab_target or "CNPJ"
-        )
+        mon_cons_tab_cnpj, mon_cons_tab_cnj = st.tabs(["CNPJ", "Processos"])
 
         with mon_cons_tab_cnj:
             if not st.session_state.processes:
@@ -1865,14 +3507,13 @@ elif module == "Monitoramento":
     with mon_tab_sei:
 
         SEI_TODOS_ORGAOS = "Todos os Órgãos"
-        sei_cons_tab_labels = [SEI_TODOS_ORGAOS] + SEI_ORGAOS
-        _nav_sei_org_target = st.session_state.pop("_nav_sei_org", None)
-        _nav_sei_process_target = st.session_state.pop("_nav_sei_process", None)
-        sei_cons_tabs = st.tabs(sei_cons_tab_labels, default=_nav_sei_org_target or sei_cons_tab_labels[0])
+        sei_cons_tab_labels = [SEI_TODOS_ORGAOS] + st.session_state.sei_orgaos
+        sei_cons_tabs = st.tabs(sei_cons_tab_labels)
 
         with sei_cons_tabs[0]:
             st.session_state.setdefault("sei_todos_filters", {"orgaos": [], "status": []})
-            search_col, filter_col = st.columns([5, 1])
+
+            search_col, ver_historico_col = st.columns([3, 2])
             with search_col:
                 st.markdown('<div class="eyebrow">Buscar processo:</div>', unsafe_allow_html=True)
                 sei_search_all = st.text_input(
@@ -1881,12 +3522,8 @@ elif module == "Monitoramento":
                     key="sei_search_todos",
                     label_visibility="collapsed",
                 )
-            with filter_col:
-                st.markdown('<div class="eyebrow">&nbsp;</div>', unsafe_allow_html=True)
-                if st.button(
-                    ":material/filter_alt:", key="toolbar_filter_sei_todos", help="Filtrar", use_container_width=True
-                ):
-                    show_sei_todos_filter_dialog()
+
+            filter_row = st.container(key="sei_todos_toolbar")
 
             sei_todos_filters = st.session_state["sei_todos_filters"]
             filtered_all = st.session_state.sei_processes
@@ -1903,6 +3540,12 @@ elif module == "Monitoramento":
                     or term_all in p["org"].lower()
                 ]
 
+            selected_rows: list[int] = []
+
+            with filter_row:
+                if st.button(":material/filter_alt:", key="toolbar_filter_sei_todos", help="Filtrar"):
+                    show_sei_todos_filter_dialog()
+
             if not filtered_all:
                 status("Nenhum processo encontrado para os filtros selecionados.")
             else:
@@ -1912,7 +3555,7 @@ elif module == "Monitoramento":
                         "Órgão": proc["org"],
                         "Interessado": proc.get("interessado") or "não informado",
                         "Responsável": proc.get("responsavel") or "não informado",
-                        "Link de acesso": (find_credencial_for_processo(proc["number"]) or {}).get("link"),
+                        "Link de acesso": sei_consultar_link(proc),
                         "Status do link": sei_link_status(proc)[0],
                     }
                     for proc in filtered_all
@@ -1925,14 +3568,27 @@ elif module == "Monitoramento":
                     selection_mode="single-row",
                     key="sei_todos_table",
                     column_config={
-                        "Link de acesso": st.column_config.LinkColumn("Link de acesso", display_text="Abrir ↗"),
+                        "Número": st.column_config.TextColumn("Número", width="small"),
+                        "Órgão": st.column_config.TextColumn("Órgão", width="medium"),
+                        "Interessado": st.column_config.TextColumn("Interessado", width="medium"),
+                        "Responsável": st.column_config.TextColumn("Responsável", width="medium"),
+                        "Link de acesso": st.column_config.LinkColumn(
+                            "Link de acesso", display_text="Abrir ↗", width="small"
+                        ),
+                        "Status do link": st.column_config.TextColumn("Status do link", width="medium"),
                     },
                 )
-                st.caption("Selecione uma linha para ver as movimentações do processo.")
                 selected_rows = selection.get("selection", {}).get("rows", []) if selection else []
+
+            with ver_historico_col:
+                st.markdown(
+                    '<div class="eyebrow">Selecione um processo para consultar.</div>',
+                    unsafe_allow_html=True,
+                )
                 if st.button(
-                    "Ver histórico de movimentações",
+                    "Consultar movimentações",
                     key="sei_todos_ver_historico",
+                    type="primary",
                     disabled=not selected_rows,
                     use_container_width=True,
                 ):
@@ -1941,11 +3597,11 @@ elif module == "Monitoramento":
                         f"{selected_proc['org']} · {selected_proc['number']}",
                         movimentacoes_sei_processo(selected_proc),
                         ultima_atualizacao=selected_proc.get("last_query"),
-                        consultar_link=(find_credencial_for_processo(selected_proc["number"]) or {}).get("link"),
+                        consultar_link=sei_consultar_link(selected_proc),
                         consultar_proc=selected_proc,
                     )
 
-        for sei_org_tab, sei_org_name in zip(sei_cons_tabs[1:], SEI_ORGAOS):
+        for sei_org_tab, sei_org_name in zip(sei_cons_tabs[1:], st.session_state.sei_orgaos):
             with sei_org_tab:
                 org_processes = [p for p in st.session_state.sei_processes if p["org"] == sei_org_name]
 
@@ -1955,26 +3611,19 @@ elif module == "Monitoramento":
                     process_options = [
                         f"{p['number']} · {p.get('interessado') or 'sem interessado'}" for p in org_processes
                     ]
-                    default_index = 0
-                    if _nav_sei_org_target == sei_org_name and _nav_sei_process_target:
-                        default_index = next(
-                            (i for i, p in enumerate(org_processes) if p["number"] == _nav_sei_process_target), 0
-                        )
                     select_process_col, _spacer_col = st.columns([2, 3])
                     with select_process_col:
                         st.markdown('<div class="eyebrow">Selecionar processo:</div>', unsafe_allow_html=True)
                         selected_process = st.selectbox(
                             "Selecionar processo para consulta",
                             process_options,
-                            index=default_index,
                             key=f"sei_select_process_{sei_org_name}",
                             label_visibility="collapsed",
                         )
                     selected_index = process_options.index(selected_process)
                     proc = org_processes[selected_index]
 
-                    credencial = find_credencial_for_processo(proc["number"])
-                    link = credencial["link"] if credencial and credencial.get("link") else None
+                    link = sei_consultar_link(proc)
 
                     consultar_col, info_col = st.columns([4, 1])
                     with consultar_col:
@@ -1984,7 +3633,6 @@ elif module == "Monitoramento":
                             type="primary",
                             use_container_width=True,
                             disabled=not link,
-                            on_click=lambda proc=proc: proc.__setitem__("last_query", datetime.now()),
                             key=f"consultar_sei_{sei_org_name}",
                         )
                     with info_col:
@@ -1992,7 +3640,12 @@ elif module == "Monitoramento":
                             show_monitoramento_info_dialog("SEI")
 
                     if not link:
-                        status("Link de acesso não cadastrado para este processo. Cadastre em Links e Autenticações.", "warn")
+                        if proc.get("forma_acesso") == "Consulta pública":
+                            status(
+                                f"Link do portal de consulta pública não cadastrado para {sei_org_name}.", "warn"
+                            )
+                        else:
+                            status("Link de acesso não cadastrado para este processo. Cadastre em Links e E-mails.", "warn")
 
                     ultima_data, ultima_descricao = ultima_movimentacao_sei(proc)
                     last_query = proc.get("last_query")
@@ -2031,12 +3684,146 @@ elif module == "Monitoramento":
                         status("Nenhuma movimentação registrada ainda para este processo.")
 
     with mon_tab_tcu:
-        tcu_consultar_col, tcu_info_col = st.columns([4, 1])
-        with tcu_consultar_col:
-            st.button("Consultar TCU", disabled=True, use_container_width=True, key="consultar_tcu")
-        with tcu_info_col:
-            if st.button("Informações", key="info_tcu", use_container_width=True):
-                show_monitoramento_info_dialog("TCU")
+        _tcu_conectado = google_account_connected()
+
+        if not st.session_state.tcu_processes:
+            status("Nenhum processo TCU cadastrado ainda. Cadastre um processo para consultar.", "warn")
+        else:
+            tcu_process_options = [
+                f"{p['number']} · {p.get('interessado') or 'sem interessado'}" for p in st.session_state.tcu_processes
+            ]
+            select_tcu_col, sync_tcu_col = st.columns([2, 3])
+            with select_tcu_col:
+                st.markdown('<div class="eyebrow">Selecionar processo:</div>', unsafe_allow_html=True)
+                selected_tcu_process = st.selectbox(
+                    "Selecionar processo TCU",
+                    tcu_process_options,
+                    key="tcu_select_process",
+                    label_visibility="collapsed",
+                )
+            with sync_tcu_col:
+                st.markdown('<div class="eyebrow">Sincronizar com Push:</div>', unsafe_allow_html=True)
+                if st.button(
+                    "Sincronizar",
+                    use_container_width=True,
+                    key="sincronizar_tcu",
+                    disabled=not _tcu_conectado,
+                    help="Lê a caixa do Gmail conectado em busca de e-mails de push do TCU."
+                    if _tcu_conectado else "Conecte sua conta Google em Autenticações primeiro.",
+                ):
+                    with st.spinner("Sincronizando..."):
+                        tcu_novos, tcu_avisos = sincronizar_tcu_push()
+                    if tcu_novos:
+                        st.success(f"{tcu_novos} nova(s) movimentação(ões) importada(s).")
+                    elif not tcu_avisos:
+                        st.info("Nenhuma movimentação nova encontrada.")
+                    for tcu_aviso in tcu_avisos:
+                        st.warning(tcu_aviso)
+
+            selected_tcu_index = tcu_process_options.index(selected_tcu_process)
+            tcu_proc = st.session_state.tcu_processes[selected_tcu_index]
+
+            tcu_consultar_url = tcu_proc.get("conecta_url") or tcu_conecta_url(tcu_proc["number"])
+
+            consultar_tcu_col, info_tcu_col = st.columns([4, 1])
+            with consultar_tcu_col:
+                st.link_button(
+                    "Consultar no Conecta TCU",
+                    tcu_consultar_url,
+                    type="primary",
+                    use_container_width=True,
+                    key="consultar_tcu_processo",
+                )
+            st.caption(
+                "Exige login no Conecta TCU (histórico completo). Sem login? "
+                f"[Busca pública, sem login ↗]({tcu_pesquisa_publica_url(tcu_proc['number'])})"
+            )
+            with info_tcu_col:
+                if st.button("Informações", key="info_tcu", use_container_width=True):
+                    show_monitoramento_info_dialog("TCU")
+
+            tcu_ultima_data, tcu_ultima_descricao = ultima_movimentacao_tcu(tcu_proc)
+            tcu_last_query = tcu_proc.get("last_query")
+
+            tcu_summary_a, tcu_summary_b, tcu_summary_c = st.columns(3)
+            with tcu_summary_a:
+                card(
+                    "INTERESSADO",
+                    tcu_proc.get("interessado") or "não informado",
+                    tcu_proc.get("responsavel") or "sem responsável",
+                )
+            with tcu_summary_b:
+                card(
+                    "ÚLTIMA MOVIMENTAÇÃO",
+                    tcu_ultima_data.strftime("%d/%m/%Y") if tcu_ultima_data else "—",
+                    tcu_ultima_descricao or "sem registro",
+                )
+            with tcu_summary_c:
+                tcu_last_query_label = tcu_last_query.strftime("%d/%m/%Y %H:%M") if tcu_last_query else "—"
+                card("ÚLTIMA CONSULTA", tcu_last_query_label, "data e hora")
+
+            st.markdown(
+                '<div class="eyebrow" style="margin-top:1.2rem;">Movimentações registradas:</div>',
+                unsafe_allow_html=True,
+            )
+            tcu_fonte = st.segmented_control(
+                "Fonte",
+                ["Push", "Conecta TCU"],
+                default="Push",
+                key=f"tcu_fonte_{tcu_proc['number']}",
+                label_visibility="collapsed",
+            ) or "Push"
+
+            if tcu_fonte == "Push":
+                tcu_mov_rows = movimentacoes_tcu_processo(tcu_proc)
+                if tcu_mov_rows:
+                    tcu_mov_rows_sorted = sorted(tcu_mov_rows, key=lambda r: r.get("Data") or date.min, reverse=True)
+                    st.dataframe(
+                        tcu_mov_rows_sorted,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={"Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY")},
+                    )
+                else:
+                    status(
+                        "Nenhuma movimentação via Push ainda. Sincronize ou aguarde a próxima movimentação.", "warn"
+                    )
+            else:
+                with st.expander(
+                    "Colar histórico do Conecta TCU",
+                    expanded=not tcu_proc.get("movements_conecta"),
+                ):
+                    st.caption(
+                        "Na aba HISTÓRICO do Conecta TCU, selecione e copie as linhas do processo e cole abaixo. "
+                        "Formato esperado por linha: \"DD/MM/AAAA HH:MM:SS - descrição\"."
+                    )
+                    tcu_conecta_texto = st.text_area(
+                        "Colar histórico",
+                        height=150,
+                        key=f"tcu_conecta_paste_{tcu_proc['number']}",
+                        label_visibility="collapsed",
+                    )
+                    if st.button("Importar", key=f"tcu_conecta_import_{tcu_proc['number']}"):
+                        tcu_conecta_novos = importar_historico_conecta_tcu(tcu_proc, tcu_conecta_texto)
+                        if tcu_conecta_novos:
+                            st.success(f"{tcu_conecta_novos} movimentação(ões) nova(s) importada(s).")
+                        else:
+                            st.warning("Nenhuma movimentação nova reconhecida nesse texto.")
+                        st.rerun()
+
+                tcu_mov_rows_conecta = movimentacoes_tcu_conecta(tcu_proc)
+                if tcu_mov_rows_conecta:
+                    tcu_mov_rows_conecta_sorted = sorted(
+                        tcu_mov_rows_conecta, key=lambda r: r.get("Data") or date.min, reverse=True
+                    )
+                    st.dataframe(
+                        tcu_mov_rows_conecta_sorted,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={"Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY")},
+                    )
+                else:
+                    status("Nenhuma movimentação do Conecta TCU importada ainda.", "warn")
 
 elif module == "Cadastro":
     st.markdown(
@@ -2048,7 +3835,7 @@ elif module == "Cadastro":
         unsafe_allow_html=True,
     )
 
-    CADASTRO_SISTEMAS = ["DJe", "SEI"]
+    CADASTRO_SISTEMAS = ["DJe", "SEI", "TCU"]
 
     def _on_cadastro_sistema_change() -> None:
         st.session_state.cadastro_sistema = st.session_state.cadastro_sistema_select
@@ -2074,11 +3861,54 @@ elif module == "Cadastro":
             st.session_state.setdefault("processo_delete_open", False)
             st.session_state.setdefault("processo_filters", {"orgaos": []})
 
-            with st.container(key="processo_toolbar"):
+            processo_toolbar = st.container(key="processo_toolbar")
+            processo_selected_rows: list[int] = []
+            filtered_processes: list[dict] = []
+
+            processo_filters = st.session_state.processo_filters
+            filtered_processes = st.session_state.processes
+            if processo_filters["orgaos"]:
+                filtered_processes = [
+                    p for p in filtered_processes if resolve_orgao_label(p["number"]) in processo_filters["orgaos"]
+                ]
+
+            if not filtered_processes:
+                status("Nenhum processo cadastrado ainda.")
+            else:
+                processo_table_rows = [
+                    {
+                        "Número do processo": p["number"],
+                        "Interessado": p["label"],
+                        "Órgão": resolve_orgao_label(p["number"]),
+                        "Responsável": p.get("responsavel") or "não informado",
+                    }
+                    for p in filtered_processes
+                ]
+                processo_selection = st.dataframe(
+                    processo_table_rows,
+                    use_container_width=True,
+                    hide_index=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key="processo_table",
+                )
+                st.caption("Clique em uma linha para selecioná-la e habilitar o ícone de edição acima.")
+                processo_selected_rows = (
+                    processo_selection.get("selection", {}).get("rows", []) if processo_selection else []
+                )
+
+            with processo_toolbar:
                 if st.button(":material/filter_alt:", key="toolbar_filter_processo", help="Filtrar"):
                     show_process_filter_dialog()
                 if st.button(":material/add:", key="toolbar_add_processo", help="Cadastrar processo"):
                     show_add_process_dialog()
+                if st.button(
+                    ":material/edit:", key="toolbar_edit_processo", help="Editar processo",
+                    disabled=not processo_selected_rows,
+                ):
+                    p = filtered_processes[processo_selected_rows[0]]
+                    orig_index_by_number = {item["number"]: i for i, item in enumerate(st.session_state.processes)}
+                    show_edit_process_dialog(orig_index_by_number[p["number"]])
                 if st.button(":material/delete:", key="toolbar_delete_processo", help="Excluir"):
                     st.session_state.processo_delete_open = not st.session_state.processo_delete_open
 
@@ -2101,42 +3931,45 @@ elif module == "Cadastro":
                         st.success("Processo removido.")
                         st.rerun()
 
-            processo_filters = st.session_state.processo_filters
-            filtered_processes = st.session_state.processes
-            if processo_filters["orgaos"]:
-                filtered_processes = [
-                    p for p in filtered_processes if resolve_orgao_label(p["number"]) in processo_filters["orgaos"]
-                ]
-
-            if not filtered_processes:
-                status("Nenhum processo cadastrado ainda.")
-            else:
-                orig_index_by_number = {p["number"]: i for i, p in enumerate(st.session_state.processes)}
-                ratios = [2, 3, 3, 2, 1]
-                header_cols = st.columns(ratios)
-                for col, label in zip(header_cols, ["Órgão", "Cliente", "Número do processo", "Responsável", ""]):
-                    with col:
-                        st.markdown(f'<div class="painel-row-th">{html.escape(label)}</div>', unsafe_allow_html=True)
-                for p in filtered_processes:
-                    row_cols = st.columns(ratios)
-                    row_cols[0].markdown(f'<div class="painel-row-td">{html.escape(resolve_orgao_label(p["number"]))}</div>', unsafe_allow_html=True)
-                    row_cols[1].markdown(f'<div class="painel-row-td">{html.escape(p["label"])}</div>', unsafe_allow_html=True)
-                    row_cols[2].markdown(f'<div class="painel-row-td">{html.escape(p["number"])}</div>', unsafe_allow_html=True)
-                    row_cols[3].markdown(f'<div class="painel-row-td">{html.escape(p.get("responsavel") or "não informado")}</div>', unsafe_allow_html=True)
-                    with row_cols[4]:
-                        if st.button(
-                            ":material/edit:",
-                            key=f"edit_processo_{orig_index_by_number[p['number']]}",
-                            help="Editar processo",
-                        ):
-                            show_edit_process_dialog(orig_index_by_number[p["number"]])
-
         with cad_tab_cnpj:
             st.session_state.setdefault("cnpj_delete_open", False)
 
-            with st.container(key="cnpj_toolbar"):
+            cnpj_toolbar = st.container(key="cnpj_toolbar")
+            cnpj_selected_rows: list[int] = []
+            filtered_cnpjs = st.session_state.monitored_cnpjs
+
+            if not filtered_cnpjs:
+                status("Nenhum CNPJ cadastrado.", "warn")
+            else:
+                cnpj_table_rows = [
+                    {
+                        "CNPJ": format_cnpj_br(item["cnpj"]),
+                        "Interessado": item.get("interessado") or "não informado",
+                        "Responsável": item.get("responsavel") or "não informado",
+                        "Razão Social": item["label"],
+                    }
+                    for item in filtered_cnpjs
+                ]
+                cnpj_selection = st.dataframe(
+                    cnpj_table_rows,
+                    use_container_width=True,
+                    hide_index=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key="cnpj_table",
+                )
+                st.caption("Clique em uma linha para selecioná-la e habilitar o ícone de edição acima.")
+                cnpj_selected_rows = cnpj_selection.get("selection", {}).get("rows", []) if cnpj_selection else []
+
+            with cnpj_toolbar:
                 if st.button(":material/add:", key="toolbar_add_cnpj", help="Cadastrar CNPJ"):
                     show_add_cnpj_dialog()
+                if st.button(
+                    ":material/edit:", key="toolbar_edit_cnpj", help="Editar CNPJ", disabled=not cnpj_selected_rows,
+                ):
+                    item = filtered_cnpjs[cnpj_selected_rows[0]]
+                    orig_index_by_cnpj = {c["cnpj"]: i for i, c in enumerate(st.session_state.monitored_cnpjs)}
+                    show_edit_cnpj_dialog(orig_index_by_cnpj[item["cnpj"]])
                 if st.button(":material/delete:", key="toolbar_delete_cnpj", help="Excluir"):
                     st.session_state.cnpj_delete_open = not st.session_state.cnpj_delete_open
 
@@ -2157,44 +3990,148 @@ elif module == "Cadastro":
                         st.success("CNPJ removido.")
                         st.rerun()
 
-            filtered_cnpjs = st.session_state.monitored_cnpjs
-
-            if not filtered_cnpjs:
-                status("Nenhum CNPJ cadastrado.", "warn")
-            else:
-                orig_index_by_cnpj = {item["cnpj"]: i for i, item in enumerate(st.session_state.monitored_cnpjs)}
-                ratios = [2, 3, 2, 2, 1]
-                header_cols = st.columns(ratios)
-                for col, label in zip(header_cols, ["CNPJ", "Razão Social", "Cliente", "Responsável", ""]):
-                    with col:
-                        st.markdown(f'<div class="painel-row-th">{html.escape(label)}</div>', unsafe_allow_html=True)
-                for item in filtered_cnpjs:
-                    row_cols = st.columns(ratios)
-                    row_cols[0].markdown(f'<div class="painel-row-td">{html.escape(format_cnpj_br(item["cnpj"]))}</div>', unsafe_allow_html=True)
-                    row_cols[1].markdown(f'<div class="painel-row-td">{html.escape(item["label"])}</div>', unsafe_allow_html=True)
-                    row_cols[2].markdown(f'<div class="painel-row-td">{html.escape(item.get("cliente") or "não informado")}</div>', unsafe_allow_html=True)
-                    row_cols[3].markdown(f'<div class="painel-row-td">{html.escape(item.get("responsavel") or "não informado")}</div>', unsafe_allow_html=True)
-                    with row_cols[4]:
-                        if st.button(
-                            ":material/edit:",
-                            key=f"edit_cnpj_{orig_index_by_cnpj[item['cnpj']]}",
-                            help="Editar CNPJ",
-                        ):
-                            show_edit_cnpj_dialog(orig_index_by_cnpj[item["cnpj"]])
-
     elif cadastro_sistema == "SEI":
-        sei_cad_org_tabs = st.tabs(SEI_ORGAOS)
-        for sei_org_tab, sei_org_name in zip(sei_cad_org_tabs, SEI_ORGAOS):
+        SEI_CAD_TODOS = "Todos os processos"
+        sei_cad_tab_labels = [SEI_CAD_TODOS] + st.session_state.sei_orgaos + ["+"]
+        sei_cad_org_tabs = st.tabs(sei_cad_tab_labels)
+
+        with sei_cad_org_tabs[0]:
+            st.session_state.setdefault("sei_delete_open_todos", False)
+            st.session_state.setdefault("sei_filters_todos", {"formas_acesso": [], "orgaos": []})
+
+            sei_toolbar_todos = st.container(key="sei_toolbar_todos")
+            sei_selected_rows_todos: list[int] = []
+            filtered_processes_todos: list[dict] = []
+
+            sei_filters_todos = st.session_state["sei_filters_todos"]
+            filtered_processes_todos = st.session_state.sei_processes
+            if sei_filters_todos["orgaos"]:
+                filtered_processes_todos = [p for p in filtered_processes_todos if p["org"] in sei_filters_todos["orgaos"]]
+            if sei_filters_todos["formas_acesso"]:
+                filtered_processes_todos = [
+                    p for p in filtered_processes_todos if p.get("forma_acesso") in sei_filters_todos["formas_acesso"]
+                ]
+
+            if not filtered_processes_todos:
+                status("Nenhum processo encontrado.")
+            else:
+                sei_table_rows_todos = [
+                    {
+                        "Número": proc["number"],
+                        "Interessado": proc.get("interessado") or "não informado",
+                        "Órgão": proc["org"],
+                        "Responsável": proc.get("responsavel") or "não informado",
+                        "Abrir": sei_consultar_link(proc),
+                        "Forma de acesso": proc.get("forma_acesso") or "—",
+                        "Status do link": sei_link_status(proc)[0],
+                    }
+                    for proc in filtered_processes_todos
+                ]
+                sei_selection_todos = st.dataframe(
+                    sei_table_rows_todos,
+                    use_container_width=True,
+                    hide_index=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key="sei_table_todos",
+                    column_config={
+                        "Abrir": st.column_config.LinkColumn("Abrir", display_text="Abrir ↗", width="small"),
+                    },
+                )
+                st.caption("Clique em uma linha para selecioná-la e habilitar o ícone de edição acima.")
+                sei_selected_rows_todos = sei_selection_todos.get("selection", {}).get("rows", []) if sei_selection_todos else []
+
+            with sei_toolbar_todos:
+                if st.button(":material/filter_alt:", key="toolbar_filter_sei_todos_cad", help="Filtrar"):
+                    show_sei_cadastro_todos_filter_dialog()
+                if st.button(":material/add:", key="toolbar_add_sei_todos_cad", help="Cadastrar processo administrativo"):
+                    show_add_sei_process_dialog()
+                if st.button(
+                    ":material/edit:", key="toolbar_edit_sei_todos_cad", help="Editar processo",
+                    disabled=not sei_selected_rows_todos,
+                ):
+                    proc = filtered_processes_todos[sei_selected_rows_todos[0]]
+                    orig_index_by_id = {id(p): i for i, p in enumerate(st.session_state.sei_processes)}
+                    show_edit_sei_process_dialog(orig_index_by_id[id(proc)])
+                if st.button(":material/delete:", key="toolbar_delete_sei_todos_cad", help="Excluir"):
+                    st.session_state["sei_delete_open_todos"] = not st.session_state["sei_delete_open_todos"]
+
+            if st.session_state["sei_delete_open_todos"] and st.session_state.sei_processes:
+                sei_delete_options_todos = [
+                    f"{p['org']} · {p['number']} · {p.get('interessado') or 'sem interessado'}"
+                    for p in st.session_state.sei_processes
+                ]
+                sei_del_col_todos, sei_confirm_col_todos = st.columns([3, 1])
+                with sei_del_col_todos:
+                    sei_delete_choice_todos = st.selectbox(
+                        "Selecionar processo para excluir",
+                        sei_delete_options_todos,
+                        label_visibility="collapsed",
+                        key="sei_delete_select_todos",
+                    )
+                with sei_confirm_col_todos:
+                    if st.button("Excluir", key="sei_delete_confirm_todos", use_container_width=True):
+                        proc_to_remove = st.session_state.sei_processes[sei_delete_options_todos.index(sei_delete_choice_todos)]
+                        st.session_state.sei_processes.remove(proc_to_remove)
+                        st.session_state["sei_delete_open_todos"] = False
+                        st.success("Processo removido.")
+                        st.rerun()
+
+        for sei_org_tab, sei_org_name in zip(sei_cad_org_tabs[1:-1], st.session_state.sei_orgaos):
             with sei_org_tab:
                 org_processes = [p for p in st.session_state.sei_processes if p["org"] == sei_org_name]
                 st.session_state.setdefault(f"sei_delete_open_{sei_org_name}", False)
-                st.session_state.setdefault(f"sei_filters_{sei_org_name}", {"tipos": []})
+                st.session_state.setdefault(f"sei_filters_{sei_org_name}", {"formas_acesso": []})
 
-                with st.container(key=f"sei_toolbar_{sei_org_name}"):
+                sei_toolbar = st.container(key=f"sei_toolbar_{sei_org_name}")
+                sei_selected_rows: list[int] = []
+                filtered_processes: list[dict] = []
+
+                sei_filters = st.session_state[f"sei_filters_{sei_org_name}"]
+                filtered_processes = org_processes
+                if sei_filters["formas_acesso"]:
+                    filtered_processes = [p for p in filtered_processes if p.get("forma_acesso") in sei_filters["formas_acesso"]]
+
+                if not filtered_processes:
+                    status(f"Nenhum processo encontrado para {sei_org_name}.")
+                else:
+                    sei_table_rows = [
+                        {
+                            "Número": proc["number"],
+                            "Interessado": proc.get("interessado") or "não informado",
+                            "Responsável": proc.get("responsavel") or "não informado",
+                            "Abrir": sei_consultar_link(proc),
+                            "Forma de acesso": proc.get("forma_acesso") or "—",
+                            "Status do link": sei_link_status(proc)[0],
+                        }
+                        for proc in filtered_processes
+                    ]
+                    sei_selection = st.dataframe(
+                        sei_table_rows,
+                        use_container_width=True,
+                        hide_index=True,
+                        on_select="rerun",
+                        selection_mode="single-row",
+                        key=f"sei_table_{sei_org_name}",
+                        column_config={
+                            "Abrir": st.column_config.LinkColumn("Abrir", display_text="Abrir ↗", width="small"),
+                        },
+                    )
+                    st.caption("Clique em uma linha para selecioná-la e habilitar o ícone de edição acima.")
+                    sei_selected_rows = sei_selection.get("selection", {}).get("rows", []) if sei_selection else []
+
+                with sei_toolbar:
                     if st.button(":material/filter_alt:", key=f"toolbar_filter_sei_{sei_org_name}", help="Filtrar"):
                         show_sei_filter_dialog(sei_org_name)
                     if st.button(":material/add:", key=f"toolbar_add_sei_{sei_org_name}", help="Cadastrar processo administrativo"):
                         show_add_sei_process_dialog(sei_org_name)
+                    if st.button(
+                        ":material/edit:", key=f"toolbar_edit_sei_{sei_org_name}", help="Editar processo",
+                        disabled=not sei_selected_rows,
+                    ):
+                        proc = filtered_processes[sei_selected_rows[0]]
+                        orig_index_by_id = {id(p): i for i, p in enumerate(st.session_state.sei_processes)}
+                        show_edit_sei_process_dialog(orig_index_by_id[id(proc)])
                     if st.button(":material/delete:", key=f"toolbar_delete_sei_{sei_org_name}", help="Excluir"):
                         st.session_state[f"sei_delete_open_{sei_org_name}"] = not st.session_state[f"sei_delete_open_{sei_org_name}"]
 
@@ -2218,65 +4155,111 @@ elif module == "Cadastro":
                             st.success("Processo removido.")
                             st.rerun()
 
-                sei_filters = st.session_state[f"sei_filters_{sei_org_name}"]
-                filtered_processes = org_processes
-                if sei_filters["tipos"]:
-                    filtered_processes = [p for p in filtered_processes if p.get("tipo") in sei_filters["tipos"]]
+        with sei_cad_org_tabs[-1]:
+            st.markdown('<div class="eyebrow">Adicionar novo órgão</div>', unsafe_allow_html=True)
+            if st.button("Adicionar órgão", key="open_add_sei_orgao_dialog"):
+                show_add_sei_orgao_dialog()
 
-                if not filtered_processes:
-                    status(f"Nenhum processo encontrado para {sei_org_name}.")
-                else:
-                    def _link_status_for_table(proc):
-                        if proc.get("forma_acesso") != "Link de acesso":
-                            return "Consulta pública"
-                        credencial = find_credencial_for_processo(proc["number"])
-                        if credencial and credencial.get("link"):
-                            return credencial_status(credencial.get("validade"))[0]
-                        return "Link não cadastrado"
+    elif cadastro_sistema == "TCU":
+        st.session_state.setdefault("tcu_delete_open", False)
+        st.session_state.setdefault("tcu_filters", {"tipos": []})
 
-                    orig_index_by_id = {id(p): i for i, p in enumerate(st.session_state.sei_processes)}
-                    ratios = [3, 2, 2, 2, 2, 2, 1]
-                    header_cols = st.columns(ratios)
-                    for col, label in zip(
-                        header_cols,
-                        ["Número", "Interessado", "Responsável", "Tipo", "Forma de acesso", "Status do link", ""],
-                    ):
-                        with col:
-                            st.markdown(f'<div class="painel-row-th">{html.escape(label)}</div>', unsafe_allow_html=True)
-                    for proc in filtered_processes:
-                        row_cols = st.columns(ratios)
-                        row_cols[0].markdown(f'<div class="painel-row-td">{html.escape(proc["number"])}</div>', unsafe_allow_html=True)
-                        row_cols[1].markdown(f'<div class="painel-row-td">{html.escape(proc.get("interessado") or "não informado")}</div>', unsafe_allow_html=True)
-                        row_cols[2].markdown(f'<div class="painel-row-td">{html.escape(proc.get("responsavel") or "não informado")}</div>', unsafe_allow_html=True)
-                        row_cols[3].markdown(f'<div class="painel-row-td">{html.escape(proc.get("tipo") or "—")}</div>', unsafe_allow_html=True)
-                        row_cols[4].markdown(f'<div class="painel-row-td">{html.escape(proc.get("forma_acesso") or "—")}</div>', unsafe_allow_html=True)
-                        row_cols[5].markdown(f'<div class="painel-row-td">{html.escape(_link_status_for_table(proc))}</div>', unsafe_allow_html=True)
-                        with row_cols[6]:
-                            if st.button(
-                                ":material/edit:",
-                                key=f"edit_sei_{orig_index_by_id[id(proc)]}",
-                                help="Editar processo",
-                            ):
-                                show_edit_sei_process_dialog(orig_index_by_id[id(proc)])
+        tcu_toolbar = st.container(key="tcu_toolbar")
+        tcu_selected_rows: list[int] = []
+        filtered_tcu_processes: list[dict] = []
 
-elif module == "Links e Autenticações":
+        st.link_button(
+            "Acessar Push do TCU ↗",
+            TCU_PUSH_CADASTRO_URL,
+            help=(
+                "Abre o site do TCU para cadastrar o acompanhamento processual (Push) — feito uma vez por "
+                "processo, com login gov.br, apontando para o e-mail conectado em Autenticações."
+            ),
+        )
+
+        tcu_filters = st.session_state.tcu_filters
+        filtered_tcu_processes = st.session_state.tcu_processes
+        if tcu_filters["tipos"]:
+            filtered_tcu_processes = [p for p in filtered_tcu_processes if p.get("tipo") in tcu_filters["tipos"]]
+
+        if not filtered_tcu_processes:
+            status("Nenhum processo TCU cadastrado ainda.")
+        else:
+            tcu_table_rows = [
+                {
+                    "Número (TC)": p["number"],
+                    "Interessado": p.get("interessado") or "não informado",
+                    "Responsável": p.get("responsavel") or "não informado",
+                    "Tipo": p.get("tipo") or "—",
+                }
+                for p in filtered_tcu_processes
+            ]
+            tcu_selection = st.dataframe(
+                tcu_table_rows,
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="tcu_table",
+            )
+            st.caption("Clique em uma linha para selecioná-la e habilitar o ícone de edição acima.")
+            tcu_selected_rows = tcu_selection.get("selection", {}).get("rows", []) if tcu_selection else []
+
+        with tcu_toolbar:
+            if st.button(":material/filter_alt:", key="toolbar_filter_tcu", help="Filtrar"):
+                show_tcu_filter_dialog()
+            if st.button(":material/add:", key="toolbar_add_tcu", help="Cadastrar processo TCU"):
+                show_add_tcu_process_dialog()
+            if st.button(
+                ":material/edit:", key="toolbar_edit_tcu", help="Editar processo", disabled=not tcu_selected_rows,
+            ):
+                proc = filtered_tcu_processes[tcu_selected_rows[0]]
+                orig_index_by_id = {id(p): i for i, p in enumerate(st.session_state.tcu_processes)}
+                show_edit_tcu_process_dialog(orig_index_by_id[id(proc)])
+            if st.button(":material/delete:", key="toolbar_delete_tcu", help="Excluir"):
+                st.session_state.tcu_delete_open = not st.session_state.tcu_delete_open
+
+        if st.session_state.tcu_delete_open and st.session_state.tcu_processes:
+            tcu_delete_options = [
+                f"{p['number']} · {p.get('interessado') or 'sem interessado'}" for p in st.session_state.tcu_processes
+            ]
+            tcu_del_col, tcu_confirm_col = st.columns([3, 1])
+            with tcu_del_col:
+                tcu_delete_choice = st.selectbox(
+                    "Selecionar processo para excluir",
+                    tcu_delete_options,
+                    label_visibility="collapsed",
+                    key="tcu_delete_select",
+                )
+            with tcu_confirm_col:
+                if st.button("Excluir", key="tcu_delete_confirm", use_container_width=True):
+                    idx = tcu_delete_options.index(tcu_delete_choice)
+                    st.session_state.tcu_processes.pop(idx)
+                    st.session_state.tcu_delete_open = False
+                    st.success("Processo removido.")
+                    st.rerun()
+
+elif module == "Links e E-mails":
     st.markdown(
         '<div class="hero"><div>'
         f'<div class="eyebrow">GestorJus - {html.escape(st.session_state.firm_profile["nome"])}</div>'
-        '<h1>Links e Autenticações.</h1>'
-        '<div class="lede">Controle central dos links de acesso e do prazo de validade de cada credencial '
-        'usada pelos conectores (SEI, DET e demais órgãos).</div>'
+        '<h1>Links e E-mails.</h1>'
+        '<div class="lede">Controle central dos links de acesso, do prazo de validade de cada credencial usada '
+        'pelos conectores (SEI, DET e demais órgãos) e do e-mail remetente das solicitações de renovação.</div>'
         '</div></div>',
         unsafe_allow_html=True,
     )
 
     st.session_state.setdefault("cred_filters", {"orgaos": []})
 
-    with st.container(key="cred_toolbar"):
-        if st.button(":material/filter_alt:", key="toolbar_filter_cred", help="Filtrar"):
-            show_cred_filter_dialog()
-        if st.button(":material/add:", key="toolbar_add_cred", help="Cadastrar link de acesso"):
-            show_add_credencial_dialog()
+    st.markdown('<div class="eyebrow">LINKS CADASTRADOS</div>', unsafe_allow_html=True)
+    st.caption("Cadastre, edite e monitore Links de acesso a processos restritos pela tabela abaixo.")
+
+    # Container declarado aqui, mas preenchido só depois da tabela (abaixo), para o lápis
+    # de editar já nascer sabendo qual linha está selecionada.
+    cred_toolbar = st.container(key="cred_toolbar")
+    cred_selected_rows: list[int] = []
+    filtered_creds: list[tuple[int, dict]] = []
 
     if not st.session_state.credenciais:
         status("Nenhuma credencial cadastrada ainda.", "warn")
@@ -2291,11 +4274,13 @@ elif module == "Links e Autenticações":
         else:
             cred_table_rows = [
                 {
+                    "Identificador": item.get("nome") or "—",
                     "Órgão": item["org"],
                     "Processo vinculado": item.get("processo") or "Geral",
                     "Link": item.get("link") or None,
                     "Validade": item["validade"].strftime("%d/%m/%Y") if item.get("validade") else "—",
                     "Status": credencial_status(item.get("validade"))[0],
+                    "E-mail remetente": ", ".join(item.get("emails") or []) or "—",
                 }
                 for _, item in filtered_creds
             ]
@@ -2308,9 +4293,135 @@ elif module == "Links e Autenticações":
                 key="cred_table",
                 column_config={"Link": st.column_config.LinkColumn("Link", display_text="Abrir ↗")},
             )
-            st.caption("Selecione uma linha para editar a credencial.")
             cred_selected_rows = cred_selection.get("selection", {}).get("rows", []) if cred_selection else []
+
+    with cred_toolbar:
+        if st.button(":material/filter_alt:", key="toolbar_filter_cred", help="Filtrar"):
+            show_cred_filter_dialog()
+        if st.button(":material/add:", key="toolbar_add_cred", help="Cadastrar link de acesso"):
+            show_add_credencial_dialog()
+        if st.button(
+            ":material/edit:", key="toolbar_edit_cred", help="Editar credencial e e-mail remetente",
+            disabled=not cred_selected_rows,
+        ):
+            show_edit_credencial_dialog(filtered_creds[cred_selected_rows[0]][0])
+
+    st.markdown('<div class="eyebrow">E-MAIL PADRÃO DE SOLICITAÇÃO DE RENOVAÇÃO</div>', unsafe_allow_html=True)
+    st.caption(
+        "Este é o e-mail usado quando você clica em \"Solicitar novo link\" no Painel Geral — um e-mail é gerado "
+        "separadamente para cada processo. O envio é semiautomático: você revisa o texto e os destinatários antes "
+        "de confirmar o envio. Placeholders disponíveis: {processo}, {orgao}, {link}, {validade}, {status} (ex.: "
+        "\"vencido há 8 dia(s)\"), {usuario}, {escritorio}."
+    )
+    with st.form("email_template_form"):
+        template_assunto = st.text_input(
+            "Assunto", value=st.session_state.email_template["assunto"], key="email_template_assunto_input"
+        )
+        template_corpo = st.text_area(
+            "Corpo", value=st.session_state.email_template["corpo"], height=220, key="email_template_corpo_input"
+        )
+        save_template = st.form_submit_button("Salvar e-mail padrão", use_container_width=True)
+    if save_template:
+        if not template_assunto.strip() or not template_corpo.strip():
+            st.warning("Informe o assunto e o corpo do e-mail.")
+        else:
+            st.session_state.email_template = {"assunto": template_assunto.strip(), "corpo": template_corpo}
+            st.success("E-mail padrão atualizado.")
+            st.rerun()
+
+elif module == "Autenticações":
+    st.markdown(
+        '<div class="hero"><div>'
+        f'<div class="eyebrow">GestorJus - {html.escape(st.session_state.firm_profile["nome"])}</div>'
+        '<h1>Autenticações.</h1>'
+        '<div class="lede">Contas e credenciais que você cadastra e mantém para acessar os sistemas externos.</div>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="eyebrow">CONTA GOOGLE (LOGIN)</div>', unsafe_allow_html=True)
+    _remetente = st.session_state.firm_profile.get("email") or ""
+    if _remetente:
+        status(f"E-mail do escritório (cadastrado no Perfil): {html.escape(_remetente)}", "ok")
+    else:
+        status("Nenhum e-mail cadastrado no Perfil do escritório ainda. Cadastre em Perfil do escritório, na tela inicial.", "warn")
+
+    if not is_gmail_address(_remetente):
+        status(
+            "O e-mail acima não é do Gmail, então o login com Google não se aplica — não é possível conectar uma "
+            "conta que não seja @gmail.com. Ao clicar em \"Solicitar novo link\", a solicitação de cada processo "
+            "abre pronta no Gmail, Outlook ou no seu app de e-mail padrão para você enviar manualmente.",
+            "neutral",
+        )
+    else:
+        _oauth_connected = bool(st.session_state.email_sender_config.get("oauth_account"))
+        if _oauth_connected:
+            status("Conta Google conectada. O envio de \"Solicitar novo link\" acontece automaticamente.", "ok")
+            if st.button("Desconectar conta Google", key="oauth_google_disconnect_button"):
+                desconectar_conta_google()
+                st.rerun()
+        else:
+            status("Conecte sua conta Google para permitir o envio automático via Gmail.", "warn")
+            _client_ready = _google_oauth_client_config() is not None
+            if not _client_ready:
+                status(
+                    "Credenciais do app Google ainda não configuradas pelo administrador do sistema.",
+                    "neutral",
+                )
             if st.button(
-                "Editar credencial", key="edit_credencial", disabled=not cred_selected_rows, use_container_width=True
+                ":material/login: Conectar com Google",
+                key="oauth_google_connect_button",
+                disabled=not _client_ready,
+                help="Abre o navegador para você fazer login e autorizar o envio." if _client_ready
+                else "Credenciais do app Google não configuradas.",
+                use_container_width=True,
             ):
-                show_edit_credencial_dialog(filtered_creds[cred_selected_rows[0]][0])
+                with st.spinner("Aguardando login no navegador..."):
+                    ok, msg = conectar_conta_google()
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+    st.markdown('<div class="eyebrow">CREDENCIAIS</div>', unsafe_allow_html=True)
+    st.caption(
+        "Cadastre aqui as demais autenticações que você usa no dia a dia: e-mail, SEI, GOV.br, chaves de API "
+        "(DataJud, DJEN, DJe, TCU) e qualquer outro órgão que vier a ser integrado. No campo \"Chave\", use apenas "
+        "um identificador — não é preciso saber o nome técnico usado no sistema."
+    )
+
+    auth_toolbar = st.container(key="auth_toolbar")
+    auth_selected_rows: list[int] = []
+
+    if not st.session_state.auth_credenciais:
+        status("Nenhuma autenticação cadastrada ainda.", "warn")
+    else:
+        auth_table_rows = [
+            {
+                "Chave": item.get("chave") or "—",
+                "Sistema/Órgão": item.get("sistema") or "—",
+                "Usuário/Login": item.get("usuario") or "—",
+                "Senha/Chave": mask_secret(item.get("valor")),
+                "Observação": item.get("observacao") or "—",
+            }
+            for item in st.session_state.auth_credenciais
+        ]
+        auth_selection = st.dataframe(
+            auth_table_rows,
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="auth_table",
+        )
+        auth_selected_rows = auth_selection.get("selection", {}).get("rows", []) if auth_selection else []
+
+    with auth_toolbar:
+        if st.button(":material/add:", key="toolbar_add_auth", help="Cadastrar autenticação"):
+            show_add_auth_dialog()
+        if st.button(
+            ":material/edit:", key="toolbar_edit_auth", help="Editar ou remover autenticação",
+            disabled=not auth_selected_rows,
+        ):
+            show_edit_auth_dialog(auth_selected_rows[0])
