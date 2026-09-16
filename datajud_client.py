@@ -125,6 +125,11 @@ class DataJudError(RuntimeError):
     pass
 
 
+class DataJudConfigError(DataJudError):
+    """Erro de configuração (chave ausente, tribunal sem alias mapeado) — não tem relação com rede
+    ou com a localização geográfica de onde a requisição parte, diferente das demais DataJudError."""
+
+
 class DataJudClient:
     """Cliente para a API Pública do DataJud (CNJ).
 
@@ -136,7 +141,7 @@ class DataJudClient:
     def __init__(self, api_key: Optional[str] = None, session: Optional[requests.Session] = None):
         self.api_key = api_key or os.environ.get("DATAJUD_API_KEY") or self._read_key_file()
         if not self.api_key:
-            raise DataJudError(
+            raise DataJudConfigError(
                 "Chave do DataJud não encontrada. Defina DATAJUD_API_KEY ou salve a "
                 f"chave pública vigente em {DATAJUD_KEY_FILE}."
             )
@@ -159,7 +164,7 @@ class DataJudClient:
     def buscar_por_numero_processo(self, numero: NumeroProcessoCNJ) -> dict[str, Any]:
         alias = numero.resolver_alias_datajud()
         if not alias:
-            raise DataJudError(
+            raise DataJudConfigError(
                 f"Não há alias de DataJud mapeado para segmento={numero.segmento} "
                 f"tribunal={numero.tribunal}. Complete ALIAS_DATAJUD a partir da "
                 f"wiki oficial antes de consultar esse tribunal."

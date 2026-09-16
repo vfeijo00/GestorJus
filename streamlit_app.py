@@ -41,7 +41,7 @@ for _google_env_var in ("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET"):
             pass
 
 from comunica_client import ComunicaClient, ComunicaError  # noqa: E402
-from datajud_client import DataJudClient, DataJudError, NumeroProcessoCNJ  # noqa: E402
+from datajud_client import DataJudClient, DataJudConfigError, DataJudError, NumeroProcessoCNJ  # noqa: E402
 
 
 @st.cache_data
@@ -1753,12 +1753,14 @@ DATAJUD_SISTEMA_EXEMPLO = "PJe"
 
 DATAJUD_INDISPONIVEL_TITULO = "Consulta em tempo real ao DataJud indisponível neste ambiente."
 DATAJUD_INDISPONIVEL_TEXTO = (
-    "A API pública do DataJud (CNJ) não respondeu a tempo a partir deste ambiente — a mesma família de "
-    "restrição de rede que afeta o DJEN: como é uma API oficial brasileira, ela pode limitar, atrasar ou "
-    "recusar requisições vindas de fora do Brasil. Este protótipo está hospedado fora do país, então a "
-    "consulta automática pode falhar ou expirar aqui — o mesmo código volta a funcionar normalmente ao "
-    "publicar em um servidor com IP brasileiro. As movimentações abaixo são <strong>ilustrativas</strong>, "
-    "exibidas apenas para demonstrar como o histórico real apareceria nesta tela."
+    "A API pública do DataJud (CNJ) não respondeu a tempo. O número do processo em si está correto — a causa "
+    "é a própria API do DataJud, que tem limite de cerca de 120 requisições por minuto e costuma ficar "
+    "instável ou lenta sob carga (a resposta mais comum é expirar o tempo de espera ou recusar a requisição "
+    "com erro 429). Pode haver também alguma restrição a requisições vindas de fora do Brasil, já que este "
+    "protótipo está hospedado fora do país — mas mesmo consultas feitas de dentro do Brasil esbarram na "
+    "instabilidade da API às vezes. Tentar novamente em alguns instantes costuma resolver; as movimentações "
+    "abaixo são <strong>ilustrativas</strong>, exibidas apenas para demonstrar como o histórico real "
+    "apareceria nesta tela."
 )
 
 
@@ -1769,18 +1771,44 @@ def render_datajud_indisponivel_notice() -> None:
     )
 
 
+DATAJUD_CONFIG_PENDENTE_TITULO = "Consulta ao DataJud não configurada neste ambiente."
+
+
+def render_datajud_config_pendente_notice(motivo: str) -> None:
+    """Ao contrário de render_datajud_indisponivel_notice, este aviso é para uma falha de
+    configuração (chave ausente, tribunal sem alias mapeado) — não tem relação com a localização
+    do servidor, então não deve citar hospedagem fora do Brasil."""
+    st.markdown(
+        f'<div class="status-info"><strong>{DATAJUD_CONFIG_PENDENTE_TITULO}</strong><br/>{html.escape(motivo)} '
+        "As movimentações abaixo são <strong>ilustrativas</strong>, exibidas apenas para demonstrar como o "
+        "histórico real apareceria nesta tela.</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_datajud_notice_for(datajud_result: dict | None) -> None:
+    if not datajud_result or not datajud_result.get("_mock"):
+        return
+    motivo_config = datajud_result.get("_mock_motivo_config")
+    if motivo_config:
+        render_datajud_config_pendente_notice(motivo_config)
+    else:
+        render_datajud_indisponivel_notice()
+
+
 def _render_dje_dialog_notices(numero_processo: str) -> None:
     """Mostra os avisos de dados ilustrativos (DJEN e/ou DataJud) para o diálogo de histórico do Painel Geral."""
     if (st.session_state.djen_results.get(numero_processo) or {}).get("_mock"):
         render_djen_indisponivel_notice()
-    if (st.session_state.datajud_results.get(numero_processo) or {}).get("_mock"):
-        render_datajud_indisponivel_notice()
+    _render_datajud_notice_for(st.session_state.datajud_results.get(numero_processo))
 
 
-def _gerar_datajud_result_exemplo(numero_processo: str, quantidade: int = 5) -> dict:
-    """Movimentações e dados de capa ilustrativos no formato do DataJud, usados quando a API real está
-    indisponível neste ambiente (hospedagem fora do Brasil, fora do alcance de IP aceito pela API pública,
-    ou tempo de resposta esgotado)."""
+def _gerar_datajud_result_exemplo(
+    numero_processo: str, quantidade: int = 5, motivo_config: Optional[str] = None
+) -> dict:
+    """Movimentações e dados de capa ilustrativos no formato do DataJud, usados quando a API real não pôde
+    ser consultada — seja por falha de rede/hospedagem (motivo_config=None) seja por um problema de
+    configuração local (motivo_config preenchido, ex.: chave ausente ou tribunal sem alias mapeado)."""
     hoje = date.today()
     movimentos = []
     for i in range(quantidade):
@@ -1801,7 +1829,13 @@ def _gerar_datajud_result_exemplo(numero_processo: str, quantidade: int = 5) -> 
         "sistema": {"nome": DATAJUD_SISTEMA_EXEMPLO},
         "dataAjuizamento": (hoje - timedelta(days=quantidade * 12 + 30)).isoformat(),
     }
-    return {"response": None, "source": source, "movements": movimentos, "_mock": True}
+    return {
+        "response": None,
+        "source": source,
+        "movements": movimentos,
+        "_mock": True,
+        "_mock_motivo_config": motivo_config,
+    }
 
 
 def _fetch_dje_processo_dados(parsed: NumeroProcessoCNJ) -> dict:
@@ -1819,6 +1853,8 @@ def _fetch_dje_processo_dados(parsed: NumeroProcessoCNJ) -> dict:
         source = hits[0].get("_source", {}) if hits else {}
         movements = client.extrair_movimentacoes(response)
         dados["datajud_result"] = {"response": response, "source": source, "movements": movements}
+    except DataJudConfigError as exc:
+        dados["datajud_result"] = _gerar_datajud_result_exemplo(process_number, motivo_config=str(exc))
     except DataJudError:
         dados["datajud_result"] = _gerar_datajud_result_exemplo(process_number)
     return dados
@@ -1924,16 +1960,16 @@ def consultar_dje_cnpj(cnpj_item: dict, *, silent: bool = False) -> tuple[bool, 
 
 if "processes" not in st.session_state:
     st.session_state.processes = [
-        {"number": "0001149-33.2026.8.26.0127", "label": "H Plus Administração e Hotelaria Ltda", "responsavel": "Sibylla Naoum"},
-        {"number": "5000145-27.2016.8.13.0016", "label": "Hotel Naoum Brasília Ltda", "responsavel": "Gabriella"},
-        {"number": "0802205-61.2024.8.19.0021", "label": "Express Brasília Hospedagem e Turismo S/A", "responsavel": "Ana Laura"},
-        {"number": "1031108-73.2025.4.01.3400", "label": "Construtora Planalto Ltda", "responsavel": "Sibylla Naoum"},
+        {"number": "1031108-73.2025.4.01.3400", "label": "Express Brasília Hospedagem e Turismo S/A", "responsavel": "Sibylla Naoum"},
+        {"number": "0744280-11.2021.8.07.0001", "label": "Express Brasília Hospedagem e Turismo S/A", "responsavel": "Gabriella"},
+        {"number": "0735376-78.2026.8.07.0016", "label": "H Plus Administração e Hotelaria Ltda", "responsavel": "Ana Laura"},
+        {"number": "0730641-62.2017.8.07.0001", "label": "H Plus Administração e Hotelaria Ltda", "responsavel": "Sibylla Naoum"},
     ]
 if "monitored_cnpjs" not in st.session_state:
     st.session_state.monitored_cnpjs = [
         {
             "cnpj": "01652106000132",
-            "label": "Hotel Naoum Brasília Ltda",
+            "label": "Express Brasília Hospedagem e Turismo S/A",
             "interessado": "Diretoria Financeira",
             "responsavel": "Gabriella",
         },
@@ -2949,8 +2985,9 @@ MONITORAMENTO_INFO = {
         "do CNPJ monitorado — a API própria do DJe ainda não tem integração implementada."
     ),
     "DET": (
-        "Conector aguardando credenciais oficiais do Domicílio Eletrônico Trabalhista (DET). Quando integrado, "
-        "buscará comunicações trabalhistas vinculadas aos CNPJs autorizados pelo escritório."
+        "O Domicílio Eletrônico Trabalhista (DET) não tem API pública, então a consulta é por monitoramento "
+        "assistido: acesso manual ao portal do DET, como já acontece com o SEI. A interface para cadastrar o "
+        "acesso e registrar as movimentações ainda não foi implementada nesta versão."
     ),
     "SEI": (
         "A consulta abre o link de acesso externo cadastrado para o processo administrativo no portal do órgão "
@@ -3578,8 +3615,7 @@ elif module == "Monitoramento":
 
                 if djen_response and djen_response.get("_mock"):
                     render_djen_indisponivel_notice()
-                if datajud_result and datajud_result.get("_mock"):
-                    render_datajud_indisponivel_notice()
+                _render_datajud_notice_for(datajud_result)
 
                 if datajud_result:
                     source = datajud_result["source"]
@@ -3604,7 +3640,7 @@ elif module == "Monitoramento":
                     timeline_rows_all = datajud_rows if timeline_source == "Movimentações (DataJud)" else djen_rows
                     timeline_rows = filter_rows_by_date_range(timeline_rows_all, periodo_data_inicial, periodo_data_final)
                     if timeline_rows:
-                        timeline_rows = sorted(timeline_rows, key=lambda row: row.get("Data") or date.min)
+                        timeline_rows = sorted(timeline_rows, key=lambda row: row.get("Data") or date.min, reverse=True)
                         column_config = {"Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY")}
                         if "Origem" in timeline_rows[0]:
                             column_config["Origem"] = st.column_config.LinkColumn("Origem", display_text="Abrir ↗")
@@ -3684,7 +3720,7 @@ elif module == "Monitoramento":
                             cnpj_djen_rows_all, periodo_cnpj_data_inicial, periodo_cnpj_data_final
                         )
                         if cnpj_timeline_rows:
-                            cnpj_timeline_rows = sorted(cnpj_timeline_rows, key=lambda row: row.get("Data") or date.min)
+                            cnpj_timeline_rows = sorted(cnpj_timeline_rows, key=lambda row: row.get("Data") or date.min, reverse=True)
                             st.dataframe(
                                 cnpj_timeline_rows,
                                 use_container_width=True,
@@ -4646,10 +4682,10 @@ elif module == "Tutorial":
     st.dataframe(
         [
             {"Plataforma": "DJe", "Modelo de consulta": "API", "Situação": "Em produção (DataJud + DJEN)"},
-            {"Plataforma": "TCU", "Modelo de consulta": "API + Push", "Situação": "Em produção"},
-            {"Plataforma": "TCU (Conecta)", "Modelo de consulta": "Monitoramento assistido · colagem inteligente", "Situação": "Em produção, como complemento ao Push"},
-            {"Plataforma": "SEI", "Modelo de consulta": "Monitoramento assistido · link externo", "Situação": "Em produção; colagem/extensão ainda não implementadas"},
-            {"Plataforma": "DET", "Modelo de consulta": "API (planejada)", "Situação": "Aguardando credenciais oficiais"},
+            {"Plataforma": "TCU", "Modelo de consulta": "Push", "Situação": "Em produção"},
+            {"Plataforma": "TCU", "Modelo de consulta": "Monitoramento assistido · colagem inteligente", "Situação": "Em produção, como complemento ao Push"},
+            {"Plataforma": "SEI", "Modelo de consulta": "Monitoramento assistido · extensão", "Situação": "Em produção; colagem/extensão ainda não implementadas"},
+            {"Plataforma": "DET", "Modelo de consulta": "Monitoramento assistido", "Situação": "Interface ainda não implementada nesta versão"},
         ],
         use_container_width=True,
         hide_index=True,
@@ -4726,7 +4762,9 @@ elif module == "Tutorial":
             "**Onde é usado hoje:** aba SEI (o app abre o link de acesso externo cadastrado para o processo no "
             "portal do órgão emissor; a colagem inteligente e a extensão ainda não foram implementadas para o "
             "SEI) e aba TCU → Conecta TCU (colagem inteligente já disponível, como complemento ao Push, para "
-            "trazer o histórico completo que exige login)."
+            "trazer o histórico completo que exige login). O DET (Domicílio Eletrônico Trabalhista) também se "
+            "enquadra nesse modelo — não tem API pública —, mas a interface de acesso manual ainda não foi "
+            "implementada nesta versão."
         )
         status(
             "Limitação: continua exigindo acesso manual ao portal do órgão (com login, quando exigido) e depende "
