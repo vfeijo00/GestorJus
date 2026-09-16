@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import html
 import json
+import mimetypes
 import os
 import re
 import sys
@@ -11,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
+from typing import Callable, Optional
 
 import pandas as pd
 import streamlit as st
@@ -44,8 +46,9 @@ from datajud_client import DataJudClient, DataJudError, NumeroProcessoCNJ  # noq
 
 @st.cache_data
 def _load_logo_data_uri(filename: str, _mtime: float) -> str:
+    content_type = mimetypes.guess_type(filename)[0] or "image/png"
     encoded = base64.b64encode((CODE_DIR / filename).read_bytes()).decode("ascii")
-    return f"data:image/png;base64,{encoded}"
+    return f"data:{content_type};base64,{encoded}"
 
 
 def load_logo_data_uri(filename: str) -> str:
@@ -376,6 +379,8 @@ st.markdown(
     .status-ok { color:var(--teal-dark); background:var(--mint); border:1px solid #c9e5d7; }
     .status-warn { color:#8a6d1f; background:#fdf6e3; border:1px solid #f1e0ad; border-left:3px solid var(--yellow); }
     .status-neutral { color:var(--muted); background:#f1f3ef; border:1px solid var(--line); }
+    .status-info { border-radius:8px; padding:.8rem 1.05rem; font:500 12.5px/1.6 Manrope; margin:.3rem 0; color:#1d4e6b; background:#eaf3fa; border:1px solid #c9dced; border-left:3px solid #3f8fcf; }
+    .status-info strong { font-weight:700; }
     .process-code { color:var(--teal-dark); font:500 12px 'DM Mono'; background:var(--mint); border-radius:6px; padding:.45rem .7rem; margin:.3rem 0; }
 
     /* Streamlit widget polish */
@@ -544,6 +549,26 @@ def _ultima_consulta_row_style(row: pd.Series) -> list[str]:
             dias = int(match.group(1))
             color = "background-color:#fdf6e3" if dias <= 5 else "background-color:#fbe4de"
     return [color if col == "Última consulta" else "" for col in row.index]
+
+
+RESPONSAVEL_CORES = {
+    "Sibylla Naoum": "#ece1f7",
+    "Gabriella": "#dff1e8",
+    "Ana Laura": "#fde8d3",
+}
+
+
+def _cor_responsavel(valor: str) -> str:
+    cor = RESPONSAVEL_CORES.get(valor)
+    return f"background-color:{cor};" if cor else ""
+
+
+def estilizar_responsavel(df: pd.DataFrame):
+    """Devolve um Styler que colore a coluna 'Responsável' com uma cor fixa por pessoa, se a coluna existir."""
+    styler = df.style
+    if "Responsável" in df.columns:
+        styler = styler.map(_cor_responsavel, subset=["Responsável"])
+    return styler
 
 
 def credencial_status(validade):
@@ -1151,7 +1176,7 @@ def render_alerts_panel() -> None:
     if not alerts:
         return
 
-    expanded = st.session_state.get("notifications_enabled", False)
+    expanded = st.session_state.get("notifications_enabled", True)
 
     with st.container(key="alerts_bell_button"):
         bell_icon = ":material/notifications:" if expanded else ":material/notifications_off:"
@@ -1523,13 +1548,17 @@ def show_movimentacoes_dialog(
     sources: dict[str, list[dict]] | None = None,
     default_source: str | None = None,
     unavailable_sources: dict[str, str] | None = None,
-    source_widgets: dict[str, "Callable[[], None]"] | None = None,
+    source_widgets: dict[str, Callable[[], None]] | None = None,
     sincronizar_action=None,
     sincronizar_disabled: bool = False,
     sincronizar_help: str | None = None,
     busca_publica_url: str | None = None,
+    notice: Callable[[], None] | None = None,
 ) -> None:
     st.markdown(f'<div class="eyebrow">{html.escape(titulo)}</div>', unsafe_allow_html=True)
+
+    if notice is not None:
+        notice()
 
     if consultar_action is not None:
         if st.button("Consultar", type="primary", use_container_width=True, key="mov_dialog_consultar_action"):
@@ -1663,14 +1692,126 @@ def movimentacoes_cnpj(cnpj_key: str) -> list[dict]:
     ]
 
 
+DJEN_ORGAOS_EXEMPLO = [
+    "1ª Vara Cível", "2ª Vara Cível", "Vara de Fazenda Pública", "1ª Turma Recursal", "Secretaria Judicial",
+]
+DJEN_TIPOS_COMUNICACAO_EXEMPLO = ["Intimação", "Citação", "Publicação de Ato Ordinatório"]
+DJEN_TIPOS_DOCUMENTO_EXEMPLO = ["Despacho", "Decisão Interlocutória", "Sentença", "Certidão de Publicação"]
+DJEN_LINK_EXEMPLO = "https://comunica.pje.jus.br/consulta"
+
+DJEN_INDISPONIVEL_TITULO = "Consulta em tempo real ao DJEN indisponível neste ambiente."
+DJEN_INDISPONIVEL_TEXTO = (
+    "A API pública do DJEN (Diário de Justiça Eletrônico Nacional) restringe requisições a endereços IP "
+    "localizados no Brasil. Este protótipo está hospedado fora do país, então a consulta automática não é "
+    "concluída aqui — o mesmo código volta a funcionar normalmente ao publicar em um servidor com IP "
+    "brasileiro (ou atrás de um proxy/túnel brasileiro). Os registros abaixo são <strong>ilustrativos</strong>, "
+    "exibidos apenas para demonstrar como as publicações reais apareceriam nesta tela."
+)
+
+
+def render_djen_indisponivel_notice() -> None:
+    st.markdown(
+        f'<div class="status-info"><strong>{DJEN_INDISPONIVEL_TITULO}</strong><br/>{DJEN_INDISPONIVEL_TEXTO}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _gerar_djen_items_exemplo(
+    numero_processo: Optional[str] = None, quantidade: int = 4
+) -> list[dict]:
+    """Publicações ilustrativas no formato do DJEN, usadas quando a API real está indisponível
+    neste ambiente (hospedagem fora do Brasil, fora do alcance de IP aceito pela API pública)."""
+    hoje = date.today()
+    itens = []
+    for i in range(quantidade):
+        dias_atras = 3 + i * 6
+        itens.append(
+            {
+                "data_disponibilizacao": (hoje - timedelta(days=dias_atras)).isoformat(),
+                "nomeOrgao": DJEN_ORGAOS_EXEMPLO[i % len(DJEN_ORGAOS_EXEMPLO)],
+                "tipoComunicacao": DJEN_TIPOS_COMUNICACAO_EXEMPLO[i % len(DJEN_TIPOS_COMUNICACAO_EXEMPLO)],
+                "tipoDocumento": DJEN_TIPOS_DOCUMENTO_EXEMPLO[i % len(DJEN_TIPOS_DOCUMENTO_EXEMPLO)],
+                "link": DJEN_LINK_EXEMPLO,
+                "numeroprocessocommascara": numero_processo,
+                "numero_processo": numero_processo,
+            }
+        )
+    return itens
+
+
+def _gerar_djen_response_exemplo(numero_processo: Optional[str] = None, quantidade: int = 4) -> dict:
+    itens = _gerar_djen_items_exemplo(numero_processo=numero_processo, quantidade=quantidade)
+    return {"items": itens, "count": len(itens), "_mock": True}
+
+
+DATAJUD_MOVIMENTOS_EXEMPLO = [
+    "Distribuição", "Juntada de Petição", "Conclusão para decisão", "Decisão", "Expedição de intimação",
+]
+DATAJUD_CLASSE_EXEMPLO = "Procedimento Comum Cível"
+DATAJUD_ASSUNTO_EXEMPLO = "Responsabilidade Civil"
+DATAJUD_SISTEMA_EXEMPLO = "PJe"
+
+DATAJUD_INDISPONIVEL_TITULO = "Consulta em tempo real ao DataJud indisponível neste ambiente."
+DATAJUD_INDISPONIVEL_TEXTO = (
+    "A API pública do DataJud (CNJ) não respondeu a tempo a partir deste ambiente — a mesma família de "
+    "restrição de rede que afeta o DJEN: como é uma API oficial brasileira, ela pode limitar, atrasar ou "
+    "recusar requisições vindas de fora do Brasil. Este protótipo está hospedado fora do país, então a "
+    "consulta automática pode falhar ou expirar aqui — o mesmo código volta a funcionar normalmente ao "
+    "publicar em um servidor com IP brasileiro. As movimentações abaixo são <strong>ilustrativas</strong>, "
+    "exibidas apenas para demonstrar como o histórico real apareceria nesta tela."
+)
+
+
+def render_datajud_indisponivel_notice() -> None:
+    st.markdown(
+        f'<div class="status-info"><strong>{DATAJUD_INDISPONIVEL_TITULO}</strong><br/>{DATAJUD_INDISPONIVEL_TEXTO}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_dje_dialog_notices(numero_processo: str) -> None:
+    """Mostra os avisos de dados ilustrativos (DJEN e/ou DataJud) para o diálogo de histórico do Painel Geral."""
+    if (st.session_state.djen_results.get(numero_processo) or {}).get("_mock"):
+        render_djen_indisponivel_notice()
+    if (st.session_state.datajud_results.get(numero_processo) or {}).get("_mock"):
+        render_datajud_indisponivel_notice()
+
+
+def _gerar_datajud_result_exemplo(numero_processo: str, quantidade: int = 5) -> dict:
+    """Movimentações e dados de capa ilustrativos no formato do DataJud, usados quando a API real está
+    indisponível neste ambiente (hospedagem fora do Brasil, fora do alcance de IP aceito pela API pública,
+    ou tempo de resposta esgotado)."""
+    hoje = date.today()
+    movimentos = []
+    for i in range(quantidade):
+        dias_atras = (quantidade - i) * 12
+        movimentos.append(
+            {
+                "numero_processo": numero_processo,
+                "data_hora": (hoje - timedelta(days=dias_atras)).isoformat(),
+                "nome": DATAJUD_MOVIMENTOS_EXEMPLO[i % len(DATAJUD_MOVIMENTOS_EXEMPLO)],
+                "complementos": None,
+                "bruto": {"orgaoJulgador": {"nome": DJEN_ORGAOS_EXEMPLO[i % len(DJEN_ORGAOS_EXEMPLO)]}},
+            }
+        )
+    source = {
+        "classe": {"nome": DATAJUD_CLASSE_EXEMPLO},
+        "assuntos": [{"nome": DATAJUD_ASSUNTO_EXEMPLO}],
+        "grau": "1º Grau",
+        "sistema": {"nome": DATAJUD_SISTEMA_EXEMPLO},
+        "dataAjuizamento": (hoje - timedelta(days=quantidade * 12 + 30)).isoformat(),
+    }
+    return {"response": None, "source": source, "movements": movimentos, "_mock": True}
+
+
 def _fetch_dje_processo_dados(parsed: NumeroProcessoCNJ) -> dict:
     """Só faz as chamadas de rede (sem tocar em st.session_state) — pode rodar em outra thread."""
     process_number = parsed.bruto
     dados: dict = {"djen_response": None, "datajud_result": None, "erros": []}
     try:
         dados["djen_response"] = ComunicaClient().buscar_todos(numero_processo=process_number)
-    except ComunicaError as exc:
-        dados["erros"].append(f"DJEN: {exc}")
+    except ComunicaError:
+        dados["djen_response"] = _gerar_djen_response_exemplo(numero_processo=process_number)
     try:
         client = DataJudClient()
         response = client.buscar_por_numero_processo(parsed)
@@ -1678,8 +1819,8 @@ def _fetch_dje_processo_dados(parsed: NumeroProcessoCNJ) -> dict:
         source = hits[0].get("_source", {}) if hits else {}
         movements = client.extrair_movimentacoes(response)
         dados["datajud_result"] = {"response": response, "source": source, "movements": movements}
-    except DataJudError as exc:
-        dados["erros"].append(f"DataJud: {exc}")
+    except DataJudError:
+        dados["datajud_result"] = _gerar_datajud_result_exemplo(process_number)
     return dados
 
 
@@ -1723,13 +1864,42 @@ DJE_CNPJ_NOT_IMPLEMENTED_MSG = (
 )
 
 
+DJEN_PROCESSOS_EXEMPLO_CNPJ = [
+    "0012045-88.2025.8.26.0100",
+    "0803312-40.2024.8.19.0001",
+    "1004521-19.2026.4.01.3400",
+]
+
+
+def _gerar_djen_response_exemplo_cnpj(quantidade: int = 3) -> dict:
+    """Como `_gerar_djen_response_exemplo`, mas com um processo fictício diferente por item —
+    a busca por CNPJ/razão social costuma reunir publicações de mais de um processo."""
+    hoje = date.today()
+    itens = []
+    for i in range(quantidade):
+        dias_atras = 4 + i * 9
+        numero = DJEN_PROCESSOS_EXEMPLO_CNPJ[i % len(DJEN_PROCESSOS_EXEMPLO_CNPJ)]
+        itens.append(
+            {
+                "data_disponibilizacao": (hoje - timedelta(days=dias_atras)).isoformat(),
+                "nomeOrgao": DJEN_ORGAOS_EXEMPLO[i % len(DJEN_ORGAOS_EXEMPLO)],
+                "tipoComunicacao": DJEN_TIPOS_COMUNICACAO_EXEMPLO[i % len(DJEN_TIPOS_COMUNICACAO_EXEMPLO)],
+                "tipoDocumento": DJEN_TIPOS_DOCUMENTO_EXEMPLO[i % len(DJEN_TIPOS_DOCUMENTO_EXEMPLO)],
+                "link": DJEN_LINK_EXEMPLO,
+                "numeroprocessocommascara": numero,
+                "numero_processo": numero,
+            }
+        )
+    return {"items": itens, "count": len(itens), "_mock": True}
+
+
 def _fetch_dje_cnpj_dados(cnpj_item: dict) -> dict:
     """Só faz a chamada de rede (sem tocar em st.session_state) — pode rodar em outra thread."""
     dados: dict = {"djen_response": None, "erro": None}
     try:
         dados["djen_response"] = ComunicaClient().buscar_todos(nome_parte=cnpj_item["label"])
-    except ComunicaError as exc:
-        dados["erro"] = f"DJEN: {exc}"
+    except ComunicaError:
+        dados["djen_response"] = _gerar_djen_response_exemplo_cnpj()
     return dados
 
 
@@ -1754,15 +1924,25 @@ def consultar_dje_cnpj(cnpj_item: dict, *, silent: bool = False) -> tuple[bool, 
 
 if "processes" not in st.session_state:
     st.session_state.processes = [
-        {"number": "0001149-33.2026.8.26.0127", "label": "TJSP · exemplo real", "responsavel": ""},
-        {"number": "5000145-27.2016.8.13.0016", "label": "TJMG · exemplo real", "responsavel": ""},
-        {"number": "0802205-61.2024.8.19.0021", "label": "TJRJ · exemplo real", "responsavel": ""},
-        {"number": "1031108-73.2025.4.01.3400", "label": "TRF1 · exemplo real", "responsavel": ""},
+        {"number": "0001149-33.2026.8.26.0127", "label": "H Plus Administração e Hotelaria Ltda", "responsavel": "Sibylla Naoum"},
+        {"number": "5000145-27.2016.8.13.0016", "label": "Hotel Naoum Brasília Ltda", "responsavel": "Gabriella"},
+        {"number": "0802205-61.2024.8.19.0021", "label": "Express Brasília Hospedagem e Turismo S/A", "responsavel": "Ana Laura"},
+        {"number": "1031108-73.2025.4.01.3400", "label": "Construtora Planalto Ltda", "responsavel": "Sibylla Naoum"},
     ]
 if "monitored_cnpjs" not in st.session_state:
     st.session_state.monitored_cnpjs = [
-        {"cnpj": "01652106000132", "label": "Express Brasília Hospedagem e Turismo S/A", "interessado": "", "responsavel": ""},
-        {"cnpj": "05217384000151", "label": "H Plus Administração e Hotelaria Ltda", "interessado": "", "responsavel": ""},
+        {
+            "cnpj": "01652106000132",
+            "label": "Hotel Naoum Brasília Ltda",
+            "interessado": "Diretoria Financeira",
+            "responsavel": "Gabriella",
+        },
+        {
+            "cnpj": "05217384000151",
+            "label": "H Plus Administração e Hotelaria Ltda",
+            "interessado": "Departamento Jurídico",
+            "responsavel": "Ana Laura",
+        },
     ]
 if "djen_results" not in st.session_state:
     st.session_state.djen_results = {}
@@ -1779,8 +1959,8 @@ if "sei_processes" not in st.session_state:
         {
             "number": "04001-00006993/2025-40",
             "org": "Governo do Distrito Federal",
-            "interessado": "",
-            "responsavel": "",
+            "interessado": "Construtora Planalto Ltda",
+            "responsavel": "Sibylla Naoum",
             "sistema_origem": "SEI",
             "forma_acesso": "Restrito",
             "link": "",
@@ -1790,8 +1970,8 @@ if "sei_processes" not in st.session_state:
         {
             "number": "58000-00012345/2025-71",
             "org": "Ministério do Esporte",
-            "interessado": "",
-            "responsavel": "",
+            "interessado": "Confederação Brasileira de Handebol",
+            "responsavel": "Gabriella",
             "sistema_origem": "SEI",
             "forma_acesso": "Restrito",
             "link": "",
@@ -1801,8 +1981,8 @@ if "sei_processes" not in st.session_state:
         {
             "number": "04001-00007300/2025-88",
             "org": "Governo do Distrito Federal",
-            "interessado": "",
-            "responsavel": "",
+            "interessado": "Consórcio Vias DF",
+            "responsavel": "Ana Laura",
             "sistema_origem": "SEI",
             "forma_acesso": "Restrito",
             "link": "",
@@ -1812,8 +1992,8 @@ if "sei_processes" not in st.session_state:
         {
             "number": "58000-00012999/2025-05",
             "org": "Ministério do Esporte",
-            "interessado": "",
-            "responsavel": "",
+            "interessado": "Federação de Vôlei de Praia do DF",
+            "responsavel": "Sibylla Naoum",
             "sistema_origem": "SEI",
             "forma_acesso": "Restrito",
             "link": "",
@@ -1823,8 +2003,8 @@ if "sei_processes" not in st.session_state:
         {
             "number": "04001-00007555/2025-20",
             "org": "Governo do Distrito Federal",
-            "interessado": "",
-            "responsavel": "",
+            "interessado": "Construtora Planalto Ltda",
+            "responsavel": "Gabriella",
             "sistema_origem": "SEI",
             "forma_acesso": "Restrito",
             "link": "",
@@ -1834,8 +2014,8 @@ if "sei_processes" not in st.session_state:
         {
             "number": "58000-00013500/2025-40",
             "org": "Ministério do Esporte",
-            "interessado": "",
-            "responsavel": "",
+            "interessado": "Confederação Brasileira de Atletismo",
+            "responsavel": "Ana Laura",
             "sistema_origem": "SEI",
             "forma_acesso": "Restrito",
             "link": "",
@@ -1845,8 +2025,8 @@ if "sei_processes" not in st.session_state:
         {
             "number": "00220-00006906/2024-56",
             "org": "Governo do Distrito Federal",
-            "interessado": "",
-            "responsavel": "",
+            "interessado": "Consórcio Vias DF",
+            "responsavel": "Sibylla Naoum",
             "sistema_origem": "SEI",
             "forma_acesso": "Consulta pública",
             "link": "",
@@ -1858,9 +2038,9 @@ if "tcu_processes" not in st.session_state:
     st.session_state.tcu_processes = [
         {
             "number": "010.139/2026-5",
-            "tipo": "Outro",
-            "interessado": "",
-            "responsavel": "",
+            "tipo": "Prestação de contas",
+            "interessado": "Confederação Brasileira de Ginástica",
+            "responsavel": "Gabriella",
             "conecta_url": "",
             "movements": [],
             "movements_conecta": [],
@@ -1868,9 +2048,9 @@ if "tcu_processes" not in st.session_state:
         },
         {
             "number": "006.971/2026-1",
-            "tipo": "Outro",
-            "interessado": "",
-            "responsavel": "",
+            "tipo": "Convênio",
+            "interessado": "Consórcio Vias DF",
+            "responsavel": "Ana Laura",
             "conecta_url": "",
             "movements": [],
             "movements_conecta": [],
@@ -1878,9 +2058,9 @@ if "tcu_processes" not in st.session_state:
         },
         {
             "number": "003.060/2026-8",
-            "tipo": "Outro",
-            "interessado": "",
-            "responsavel": "",
+            "tipo": "Sancionador",
+            "interessado": "Construtora Planalto Ltda",
+            "responsavel": "Sibylla Naoum",
             "conecta_url": "",
             "movements": [],
             "movements_conecta": [],
@@ -1905,7 +2085,7 @@ if "credenciais" not in st.session_state:
             "processo": "58000-00012345/2025-71",
             "link": "https://sei.esporte.gov.br/sei/processo_acesso_externo_consulta.php?id_acesso_externo=999001&infra_hash=exemplo1",
             "validade": date(2027, 3, 15),
-            "emails": ["viniciusfeijo360@gmail.com"],
+            "emails": ["camargosadvogados@gmail.com"],
         },
         {
             "nome": "Link GDF · processo 7300",
@@ -1913,7 +2093,7 @@ if "credenciais" not in st.session_state:
             "processo": "04001-00007300/2025-88",
             "link": "http://sei.df.gov.br/sei/processo_acesso_externo_consulta.php?id_acesso_externo=999002&infra_hash=exemplo2",
             "validade": date(2026, 12, 1),
-            "emails": ["viniciusfeijo360@gmail.com"],
+            "emails": ["camargosadvogados@gmail.com"],
         },
         {
             "nome": "Link Min. Esporte · processo 12999",
@@ -1921,7 +2101,7 @@ if "credenciais" not in st.session_state:
             "processo": "58000-00012999/2025-05",
             "link": "https://sei.esporte.gov.br/sei/processo_acesso_externo_consulta.php?id_acesso_externo=999003&infra_hash=exemplo3",
             "validade": date.today() - timedelta(days=15),
-            "emails": ["viniciusfeijo360@gmail.com"],
+            "emails": ["camargosadvogados@gmail.com"],
         },
         {
             "nome": "Link GDF · processo 7555",
@@ -1929,7 +2109,7 @@ if "credenciais" not in st.session_state:
             "processo": "04001-00007555/2025-20",
             "link": "http://sei.df.gov.br/sei/processo_acesso_externo_consulta.php?id_acesso_externo=999004&infra_hash=exemplo4",
             "validade": date.today() - timedelta(days=40),
-            "emails": ["viniciusfeijo360@gmail.com"],
+            "emails": ["camargosadvogados@gmail.com"],
         },
         {
             "nome": "Link Min. Esporte · processo 13500",
@@ -1937,7 +2117,7 @@ if "credenciais" not in st.session_state:
             "processo": "58000-00013500/2025-40",
             "link": "https://sei.esporte.gov.br/sei/processo_acesso_externo_consulta.php?id_acesso_externo=999005&infra_hash=exemplo5",
             "validade": date.today() + timedelta(days=180),
-            "emails": ["viniciusfeijo360@gmail.com"],
+            "emails": ["camargosadvogados@gmail.com"],
         },
     ]
 if "email_sender_config" not in st.session_state:
@@ -1945,7 +2125,7 @@ if "email_sender_config" not in st.session_state:
         "oauth_account": None,  # credenciais OAuth (JSON) depois de conectar a conta Google
     }
 if "notifications_enabled" not in st.session_state:
-    st.session_state.notifications_enabled = False
+    st.session_state.notifications_enabled = True
 if "email_template" not in st.session_state:
     st.session_state.email_template = {
         "assunto": "Solicitação de renovação de link de acesso – Processo {processo}",
@@ -2822,14 +3002,14 @@ def show_settings_dialog() -> None:
 
 if "firm_profile" not in st.session_state:
     st.session_state.firm_profile = {
-        "usuario": "Vinícius Feijó",
+        "usuario": "Sibylla Naoum",
         "nome": "Camargos Advogados",
-        "cnpj": "",
-        "endereco": "",
-        "area_atuacao": "",
-        "telefone": "(11) 99999-9999",
-        "email": "viniciusfeijo360@gmail.com",
-        "logo": None,
+        "cnpj": "12.345.678/0001-90",
+        "endereco": "SHIS QI 5, Bloco A, Sala 302 · Lago Sul, Brasília/DF",
+        "area_atuacao": "Direito Administrativo e Desportivo",
+        "telefone": "(61) 99999-9999",
+        "email": "camargosadvogados@gmail.com",
+        "logo": load_logo_data_uri("cmsadvogados_logo.jpg"),
     }
 
 
@@ -2949,6 +3129,15 @@ with st.sidebar:
         st.session_state.active_module = "Autenticações"
         st.rerun()
 
+    if st.button(
+        ":material/menu_book: Tutorial",
+        key="nav_tutorial_button",
+        type="primary" if _active_module == "Tutorial" else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state.active_module = "Tutorial"
+        st.rerun()
+
     if st.button(":material/settings: Configurações", key="nav_settings_button", use_container_width=True):
         show_settings_dialog()
 
@@ -3059,6 +3248,7 @@ elif module == "Painel Geral":
                     "Diário (DJEN)": dje_djen_rows(item["number"]),
                 },
                 default_source="Movimentações (DataJud)",
+                notice=lambda numero=item["number"]: _render_dje_dialog_notices(numero),
             )
         elif kind == "TCU":
             _tcu_conectado_painel = google_account_connected()
@@ -3180,7 +3370,9 @@ elif module == "Painel Geral":
                     }
                     for kind, item in filtered_proc_refs
                 ]
-                painel_proc_styler = pd.DataFrame(painel_proc_rows).style.apply(_ultima_consulta_row_style, axis=1)
+                painel_proc_styler = estilizar_responsavel(pd.DataFrame(painel_proc_rows)).apply(
+                    _ultima_consulta_row_style, axis=1
+                )
                 selection = st.dataframe(
                     painel_proc_styler,
                     use_container_width=True,
@@ -3264,7 +3456,9 @@ elif module == "Painel Geral":
                     }
                     for item in filtered_cnpj_items
                 ]
-                painel_cnpj_styler = pd.DataFrame(painel_cnpj_rows).style.apply(_ultima_consulta_row_style, axis=1)
+                painel_cnpj_styler = estilizar_responsavel(pd.DataFrame(painel_cnpj_rows)).apply(
+                    _ultima_consulta_row_style, axis=1
+                )
                 cnpj_selection = st.dataframe(
                     painel_cnpj_styler,
                     use_container_width=True,
@@ -3302,6 +3496,9 @@ elif module == "Painel Geral":
                         },
                         default_source="Diário (DJEN)",
                         unavailable_sources={"Movimentações (DJe)": DJE_CNPJ_NOT_IMPLEMENTED_MSG},
+                        notice=render_djen_indisponivel_notice
+                        if (st.session_state.djen_cnpj_results.get(item["cnpj"]) or {}).get("_mock")
+                        else None,
                     )
 
 elif module == "Monitoramento":
@@ -3378,6 +3575,11 @@ elif module == "Monitoramento":
                 with summary_c:
                     last_query_label = last_query.strftime("%d/%m/%Y %H:%M") if last_query else "—"
                     card("ÚLTIMA CONSULTA", last_query_label, "data e hora")
+
+                if djen_response and djen_response.get("_mock"):
+                    render_djen_indisponivel_notice()
+                if datajud_result and datajud_result.get("_mock"):
+                    render_datajud_indisponivel_notice()
 
                 if datajud_result:
                     source = datajud_result["source"]
@@ -3463,6 +3665,9 @@ elif module == "Monitoramento":
                 with summary_cnpj_b:
                     last_cnpj_query_label = last_cnpj_query.strftime("%d/%m/%Y %H:%M") if last_cnpj_query else "—"
                     card("ÚLTIMA CONSULTA", last_cnpj_query_label, "data e hora")
+
+                if djen_cnpj_response and djen_cnpj_response.get("_mock"):
+                    render_djen_indisponivel_notice()
 
                 if cnpj_djen_rows_all:
                     cnpj_timeline_source = st.segmented_control(
@@ -3561,7 +3766,7 @@ elif module == "Monitoramento":
                     for proc in filtered_all
                 ]
                 selection = st.dataframe(
-                    table_rows,
+                    estilizar_responsavel(pd.DataFrame(table_rows)),
                     use_container_width=True,
                     hide_index=True,
                     on_select="rerun",
@@ -3885,7 +4090,7 @@ elif module == "Cadastro":
                     for p in filtered_processes
                 ]
                 processo_selection = st.dataframe(
-                    processo_table_rows,
+                    estilizar_responsavel(pd.DataFrame(processo_table_rows)),
                     use_container_width=True,
                     hide_index=True,
                     on_select="rerun",
@@ -3951,7 +4156,7 @@ elif module == "Cadastro":
                     for item in filtered_cnpjs
                 ]
                 cnpj_selection = st.dataframe(
-                    cnpj_table_rows,
+                    estilizar_responsavel(pd.DataFrame(cnpj_table_rows)),
                     use_container_width=True,
                     hide_index=True,
                     on_select="rerun",
@@ -4028,7 +4233,7 @@ elif module == "Cadastro":
                     for proc in filtered_processes_todos
                 ]
                 sei_selection_todos = st.dataframe(
-                    sei_table_rows_todos,
+                    estilizar_responsavel(pd.DataFrame(sei_table_rows_todos)),
                     use_container_width=True,
                     hide_index=True,
                     on_select="rerun",
@@ -4107,7 +4312,7 @@ elif module == "Cadastro":
                         for proc in filtered_processes
                     ]
                     sei_selection = st.dataframe(
-                        sei_table_rows,
+                        estilizar_responsavel(pd.DataFrame(sei_table_rows)),
                         use_container_width=True,
                         hide_index=True,
                         on_select="rerun",
@@ -4195,7 +4400,7 @@ elif module == "Cadastro":
                 for p in filtered_tcu_processes
             ]
             tcu_selection = st.dataframe(
-                tcu_table_rows,
+                estilizar_responsavel(pd.DataFrame(tcu_table_rows)),
                 use_container_width=True,
                 hide_index=True,
                 on_select="rerun",
@@ -4425,3 +4630,107 @@ elif module == "Autenticações":
             disabled=not auth_selected_rows,
         ):
             show_edit_auth_dialog(auth_selected_rows[0])
+
+elif module == "Tutorial":
+    st.markdown(
+        '<div class="hero"><div>'
+        f'<div class="eyebrow">GestorJus - {html.escape(st.session_state.firm_profile["nome"])}</div>'
+        '<h1>Tutorial.</h1>'
+        '<div class="lede">Como o GestorJus consulta cada sistema — os três modelos de consulta usados hoje, '
+        'e qual órgão/plataforma usa cada um.</div>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="eyebrow">RESUMO POR PLATAFORMA</div>', unsafe_allow_html=True)
+    st.dataframe(
+        [
+            {"Plataforma": "DJe", "Modelo de consulta": "API", "Situação": "Em produção (DataJud + DJEN)"},
+            {"Plataforma": "TCU", "Modelo de consulta": "API + Push", "Situação": "Em produção"},
+            {"Plataforma": "TCU (Conecta)", "Modelo de consulta": "Monitoramento assistido · colagem inteligente", "Situação": "Em produção, como complemento ao Push"},
+            {"Plataforma": "SEI", "Modelo de consulta": "Monitoramento assistido · link externo", "Situação": "Em produção; colagem/extensão ainda não implementadas"},
+            {"Plataforma": "DET", "Modelo de consulta": "API (planejada)", "Situação": "Aguardando credenciais oficiais"},
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown('<div class="eyebrow" style="margin-top:1.6rem;">OS TRÊS MODELOS DE CONSULTA</div>', unsafe_allow_html=True)
+
+    tutorial_tab_api, tutorial_tab_push, tutorial_tab_assistido = st.tabs(
+        ["API", "Push", "Monitoramento assistido"]
+    )
+
+    with tutorial_tab_api:
+        st.markdown(
+            "**O que é:** o GestorJus fala diretamente com um endpoint oficial (HTTP/JSON) do órgão e recebe "
+            "os dados já estruturados, sob demanda, sem intervenção manual e sem precisar abrir nenhum portal."
+        )
+        st.markdown(
+            "**Onde é usado hoje:** aba DJe (DataJud do CNJ, para movimentações processuais, e DJEN — Diário de "
+            "Justiça Eletrônico Nacional, para publicações) e aba TCU (busca pública por número de processo)."
+        )
+        st.markdown(
+            "**Como funciona no app:** ao clicar em \"Consultar movimentações\", o GestorJus monta a requisição "
+            "(número CNJ, período, CNPJ/razão social etc.), envia para o endpoint público correspondente e "
+            "transforma o JSON de resposta em uma tabela cronológica. Como são APIs públicas, nenhuma senha do "
+            "usuário é pedida ou armazenada para esta consulta."
+        )
+        status(
+            "Limitação observada: o DJEN restringe requisições a endereços IP localizados no Brasil. Em um "
+            "ambiente hospedado fora do país — como este protótipo — a consulta automática ao DJEN falha; o "
+            "GestorJus detecta isso e exibe um aviso explicativo com dados ilustrativos no lugar, em vez de um "
+            "erro técnico (veja a aba Monitoramento → DJe). O mesmo código volta a consultar dados reais ao "
+            "publicar em um servidor com IP brasileiro.",
+            "neutral",
+        )
+
+    with tutorial_tab_push:
+        st.markdown(
+            "**O que é:** em vez do GestorJus ir buscar ativamente, o próprio órgão empurra (\"push\") a "
+            "notificação de cada nova movimentação para uma caixa de e-mail cadastrada. O app lê essa caixa e "
+            "extrai os dados estruturados de cada mensagem."
+        )
+        st.markdown(
+            "**Onde é usado hoje:** aba TCU, serviço oficial \"Acompanhamento processual (Push)\"."
+        )
+        st.markdown(
+            "**Como funciona no app:** o escritório cadastra, uma única vez e diretamente no site do TCU (login "
+            "gov.br), os processos de interesse apontando para o e-mail conectado ao GestorJus em Autenticações. "
+            "A partir daí, toda nova movimentação chega automaticamente por e-mail. Ao clicar em \"Sincronizar\", "
+            "o GestorJus lê a caixa do Gmail conectado via OAuth, reconhece os e-mails de Acompanhamento "
+            "processual e importa data, descrição, relator e interessados de cada movimentação — sem exigir login "
+            "no site do TCU a cada consulta."
+        )
+        status(
+            "Pré-requisito: conectar uma conta Google (Gmail) em Autenticações. O cadastro inicial do Push para "
+            "cada processo ainda precisa ser feito manualmente, uma vez, no site do TCU.",
+            "neutral",
+        )
+
+    with tutorial_tab_assistido:
+        st.markdown(
+            "**O que é:** para sistemas que não têm API pública, a consulta continua começando de forma manual — "
+            "abrir o portal do próprio órgão — mas o GestorJus reduz o trabalho de duas formas complementares:"
+        )
+        st.markdown(
+            "1. **Colagem inteligente:** o usuário seleciona e copia o histórico exibido na tela do portal (por "
+            "exemplo, a aba HISTÓRICO do Conecta TCU) e cola num campo do GestorJus. Um interpretador reconhece o "
+            "padrão \"DD/MM/AAAA HH:MM:SS - descrição\" de cada linha e organiza tudo automaticamente numa tabela, "
+            "sem digitação manual.\n"
+            "2. **Extensão de navegador (planejada):** uma extensão instalada no navegador do usuário capturaria "
+            "automaticamente os dados exibidos na página do portal durante a consulta manual (por exemplo, no "
+            "SEI) e os enviaria para o GestorJus — eliminando até a etapa de copiar e colar."
+        )
+        st.markdown(
+            "**Onde é usado hoje:** aba SEI (o app abre o link de acesso externo cadastrado para o processo no "
+            "portal do órgão emissor; a colagem inteligente e a extensão ainda não foram implementadas para o "
+            "SEI) e aba TCU → Conecta TCU (colagem inteligente já disponível, como complemento ao Push, para "
+            "trazer o histórico completo que exige login)."
+        )
+        status(
+            "Limitação: continua exigindo acesso manual ao portal do órgão (com login, quando exigido) e depende "
+            "do formato de exportação/tela do próprio portal — mudanças de layout no portal podem exigir ajuste "
+            "no interpretador.",
+            "neutral",
+        )
