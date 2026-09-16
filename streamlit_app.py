@@ -429,7 +429,7 @@ st.markdown(
 
 
 COLOR_PALETTES = {
-    "Teal & Ouro": {
+    "Camargos": {
         "ink": "#000000", "muted": "#4a4a4a", "faint": "#8a8a8a",
         "line": "#e2e2e2", "line-strong": "#cccccc",
         "paper": "#f7f7f5", "surface": "#ffffff",
@@ -447,7 +447,7 @@ COLOR_PALETTES = {
         "sidebar-btn-selected-bg": "#0c2323", "sidebar-btn-selected-text": "#ffffff",
         "app-logo": "logo_white.png",
     },
-    "ZERO": {
+    "Zero": {
         "ink": "#000000", "muted": "#545b6c", "faint": "#8990a1",
         "line": "#e3e3e1", "line-strong": "#cfcfcd",
         "paper": "#f7f6f2", "surface": "#ffffff",
@@ -468,7 +468,7 @@ COLOR_PALETTES = {
 }
 
 if "color_palette" not in st.session_state:
-    st.session_state.color_palette = "Teal & Ouro"
+    st.session_state.color_palette = "Camargos"
 
 _active_palette = COLOR_PALETTES[st.session_state.color_palette]
 st.markdown(
@@ -577,7 +577,7 @@ def credencial_status(validade):
     dias = (validade - date.today()).days
     if dias < 0:
         return (f"Vencido há {abs(dias)} dia(s)", "warn")
-    if dias <= 15:
+    if dias <= st.session_state.get("alerta_vencimento_dias", 10):
         return (f"Vence em {dias} dia(s)", "warn")
     return (f"Válido até {validade.strftime('%d/%m/%Y')}", "ok")
 
@@ -615,7 +615,7 @@ def sei_link_status(proc) -> tuple[str, str | None]:
         dias = (validade - date.today()).days
         if dias < 0:
             return f"Vencido há {abs(dias)} dia(s)", "Vencido"
-        if dias <= 10:
+        if dias <= st.session_state.get("alerta_vencimento_dias", 10):
             return f"Vence em {dias} dia(s)", "Em vencimento"
         return f"Válido até {validade.strftime('%d/%m/%Y')}", "Ativo"
     if proc.get("link"):
@@ -635,14 +635,15 @@ def sei_consultar_link(proc: dict) -> str | None:
 
 
 def credencial_alert_category(item: dict) -> str | None:
-    """Retorna 'Vencido', 'Em vencimento' (≤10 dias) ou None para uma credencial/link."""
+    """Retorna 'Vencido', 'Em vencimento' (dentro do prazo configurado em Configurações) ou None
+    para uma credencial/link."""
     validade = item.get("validade")
     if not validade:
         return None
     dias = (validade - date.today()).days
     if dias < 0:
         return "Vencido"
-    if dias <= 10:
+    if dias <= st.session_state.get("alerta_vencimento_dias", 10):
         return "Em vencimento"
     return None
 
@@ -1075,8 +1076,8 @@ def show_solicitar_link_dialog() -> None:
         return
 
     st.caption(
-        "Um e-mail é preparado separadamente para cada processo vencido ou a vencer (até 10 dias), com os "
-        "destinatários associados àquele link."
+        "Um e-mail é preparado separadamente para cada processo vencido ou a vencer (até "
+        f"{st.session_state.get('alerta_vencimento_dias', 10)} dias), com os destinatários associados àquele link."
     )
 
     remetente = st.session_state.firm_profile.get("email", "")
@@ -2162,6 +2163,8 @@ if "email_sender_config" not in st.session_state:
     }
 if "notifications_enabled" not in st.session_state:
     st.session_state.notifications_enabled = True
+if "alerta_vencimento_dias" not in st.session_state:
+    st.session_state.alerta_vencimento_dias = 10
 if "email_template" not in st.session_state:
     st.session_state.email_template = {
         "assunto": "Solicitação de renovação de link de acesso – Processo {processo}",
@@ -3035,6 +3038,19 @@ def show_settings_dialog() -> None:
             ):
                 st.session_state.color_palette = palette_name
                 st.rerun()
+
+    st.markdown('<div class="eyebrow" style="margin-top:1.2rem;">ALERTAS DE VENCIMENTO</div>', unsafe_allow_html=True)
+    novo_prazo = st.number_input(
+        "Avisar sobre links a vencer com quantos dias de antecedência?",
+        min_value=1,
+        max_value=90,
+        value=st.session_state.alerta_vencimento_dias,
+        step=1,
+        key="alerta_vencimento_dias_input",
+    )
+    if novo_prazo != st.session_state.alerta_vencimento_dias:
+        st.session_state.alerta_vencimento_dias = novo_prazo
+        st.rerun()
 
 
 if "firm_profile" not in st.session_state:
