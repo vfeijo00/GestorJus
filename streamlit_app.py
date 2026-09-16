@@ -2113,7 +2113,7 @@ if "credenciais" not in st.session_state:
             "org": "Governo do Distrito Federal",
             "processo": "04001-00006993/2025-40",
             "link": "http://sei.df.gov.br/sei/processo_acesso_externo_consulta.php?id_acesso_externo=2442842&infra_hash=f930b708871a3a2490e540fef130a96a",
-            "validade": date(2026, 9, 4),
+            "validade": date.today() + timedelta(days=10),
             "emails": ["diad@inas.df.gov.br"],
         },
         {
@@ -3048,7 +3048,11 @@ def show_settings_dialog() -> None:
         step=1,
         key="alerta_vencimento_dias_input",
     )
-    if novo_prazo != st.session_state.alerta_vencimento_dias:
+    if st.button(
+        "Aplicar",
+        key="aplicar_alerta_vencimento_dias",
+        disabled=novo_prazo == st.session_state.alerta_vencimento_dias,
+    ):
         st.session_state.alerta_vencimento_dias = novo_prazo
         st.rerun()
 
