@@ -30,7 +30,7 @@ from comunica_client import motivo_falha
 from datajud_aliases import ALIAS_DATAJUD
 
 DATAJUD_BASE_URL = "https://api-publica.datajud.cnj.jus.br"
-REQUEST_TIMEOUT_SECONDS = 20
+REQUEST_TIMEOUT_SECONDS = 60
 DATAJUD_KEY_FILE = Path(
     os.environ.get(
         "DATAJUD_KEY_FILE",

@@ -123,9 +123,15 @@ st.markdown(
     [data-testid="stSidebar"] [style*="col-resize"] { display:none !important; pointer-events:none !important; }
 
     /* Center modal dialogs over the main content area, ignoring the sidebar's width */
-    body:has([data-testid="stSidebar"][aria-expanded="true"]) div[data-testid="stDialog"] > div,
+    body:has([data-testid="stSidebar"][aria-expanded="true"]) div[data-testid="stDialog"] {
+        padding-left:21rem !important; box-sizing:border-box;
+    }
+    /* Fit any dialog inside the visible area (main region, not under the sidebar), at any desktop size */
+    div[data-testid="stDialog"] div[role="dialog"] {
+        max-width:calc(100vw - 2rem) !important; max-height:calc(100vh - 2rem) !important; overflow-y:auto;
+    }
     body:has([data-testid="stSidebar"][aria-expanded="true"]) div[data-testid="stDialog"] div[role="dialog"] {
-        transform: translateX(10.5rem);
+        max-width:calc(100vw - 21rem - 2rem) !important;
     }
 
     /* Brand */

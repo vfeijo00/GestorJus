@@ -9,7 +9,7 @@ import requests
 
 
 COMUNICA_URL = "https://comunicaapi.pje.jus.br/api/v1/comunicacao"
-REQUEST_TIMEOUT_SECONDS = 20
+REQUEST_TIMEOUT_SECONDS = 60
 # A API responde 500 para itensPorPagina muito alto (confirmado experimentalmente
 # que 1000 funciona e 5000 já falha), então paginamos em blocos de 1000.
 ITENS_POR_PAGINA_MAXIMO = 1000
