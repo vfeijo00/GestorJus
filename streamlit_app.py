@@ -1700,28 +1700,35 @@ DJEN_TIPOS_COMUNICACAO_EXEMPLO = ["Intimação", "Citação", "Publicação de A
 DJEN_TIPOS_DOCUMENTO_EXEMPLO = ["Despacho", "Decisão Interlocutória", "Sentença", "Certidão de Publicação"]
 DJEN_LINK_EXEMPLO = "https://comunica.pje.jus.br/consulta"
 
-DJEN_INDISPONIVEL_TITULO = "Consulta em tempo real ao DJEN indisponível neste ambiente."
-DJEN_INDISPONIVEL_TEXTO = (
-    "A API pública do DJEN (Diário de Justiça Eletrônico Nacional) restringe requisições a endereços IP "
-    "localizados no Brasil. Este protótipo está hospedado fora do país, então a consulta automática não é "
-    "concluída aqui — o mesmo código volta a funcionar normalmente ao publicar em um servidor com IP "
-    "brasileiro (ou atrás de um proxy/túnel brasileiro). Os registros abaixo são <strong>ilustrativos</strong>, "
-    "exibidos apenas para demonstrar como as publicações reais apareceriam nesta tela."
-)
+DJEN_INDISPONIVEL_TITULO = "Não foi possível consultar o DJEN"
+MOTIVO_NAO_IDENTIFICADO = "motivo não identificado"
 
 
-def render_djen_indisponivel_notice() -> None:
+def _render_aviso_ilustrativo(titulo: str, motivo: Optional[str], o_que: str) -> None:
     st.markdown(
-        f'<div class="status-info"><strong>{DJEN_INDISPONIVEL_TITULO}</strong><br/>{DJEN_INDISPONIVEL_TEXTO}</div>',
+        f'<div class="status-info"><strong>{titulo}:</strong> {html.escape(motivo or MOTIVO_NAO_IDENTIFICADO)}.<br/>'
+        f"{o_que} abaixo são <strong>ilustrativas</strong>.</div>",
         unsafe_allow_html=True,
     )
+
+
+def render_djen_indisponivel_notice(motivo: Optional[str] = None) -> None:
+    _render_aviso_ilustrativo(DJEN_INDISPONIVEL_TITULO, motivo, "As publicações")
+
+
+def _djen_notice_for(response: Optional[dict]) -> Optional[Callable[[], None]]:
+    """Aviso (sem argumentos) para uma resposta ilustrativa do DJEN; None se a resposta é real."""
+    if not response or not response.get("_mock"):
+        return None
+    motivo = response.get("_mock_motivo")
+    return lambda: render_djen_indisponivel_notice(motivo)
 
 
 def _gerar_djen_items_exemplo(
     numero_processo: Optional[str] = None, quantidade: int = 4
 ) -> list[dict]:
     """Publicações ilustrativas no formato do DJEN, usadas quando a API real está indisponível
-    neste ambiente (hospedagem fora do Brasil, fora do alcance de IP aceito pela API pública)."""
+    (falha de rede, limite de requisições, erro do servidor etc.)."""
     hoje = date.today()
     itens = []
     for i in range(quantidade):
@@ -1740,9 +1747,11 @@ def _gerar_djen_items_exemplo(
     return itens
 
 
-def _gerar_djen_response_exemplo(numero_processo: Optional[str] = None, quantidade: int = 4) -> dict:
+def _gerar_djen_response_exemplo(
+    numero_processo: Optional[str] = None, quantidade: int = 4, motivo: Optional[str] = None
+) -> dict:
     itens = _gerar_djen_items_exemplo(numero_processo=numero_processo, quantidade=quantidade)
-    return {"items": itens, "count": len(itens), "_mock": True}
+    return {"items": itens, "count": len(itens), "_mock": True, "_mock_motivo": motivo}
 
 
 DATAJUD_MOVIMENTOS_EXEMPLO = [
@@ -1752,24 +1761,11 @@ DATAJUD_CLASSE_EXEMPLO = "Procedimento Comum Cível"
 DATAJUD_ASSUNTO_EXEMPLO = "Responsabilidade Civil"
 DATAJUD_SISTEMA_EXEMPLO = "PJe"
 
-DATAJUD_INDISPONIVEL_TITULO = "Consulta em tempo real ao DataJud indisponível neste ambiente."
-DATAJUD_INDISPONIVEL_TEXTO = (
-    "A API pública do DataJud (CNJ) não respondeu a tempo. O número do processo em si está correto — a causa "
-    "é a própria API do DataJud, que tem limite de cerca de 120 requisições por minuto e costuma ficar "
-    "instável ou lenta sob carga (a resposta mais comum é expirar o tempo de espera ou recusar a requisição "
-    "com erro 429). Pode haver também alguma restrição a requisições vindas de fora do Brasil, já que este "
-    "protótipo está hospedado fora do país — mas mesmo consultas feitas de dentro do Brasil esbarram na "
-    "instabilidade da API às vezes. Tentar novamente em alguns instantes costuma resolver; as movimentações "
-    "abaixo são <strong>ilustrativas</strong>, exibidas apenas para demonstrar como o histórico real "
-    "apareceria nesta tela."
-)
+DATAJUD_INDISPONIVEL_TITULO = "Não foi possível consultar o DataJud"
 
 
-def render_datajud_indisponivel_notice() -> None:
-    st.markdown(
-        f'<div class="status-info"><strong>{DATAJUD_INDISPONIVEL_TITULO}</strong><br/>{DATAJUD_INDISPONIVEL_TEXTO}</div>',
-        unsafe_allow_html=True,
-    )
+def render_datajud_indisponivel_notice(motivo: Optional[str] = None) -> None:
+    _render_aviso_ilustrativo(DATAJUD_INDISPONIVEL_TITULO, motivo, "As movimentações")
 
 
 DATAJUD_CONFIG_PENDENTE_TITULO = "Consulta ao DataJud não configurada neste ambiente."
@@ -1794,18 +1790,19 @@ def _render_datajud_notice_for(datajud_result: dict | None) -> None:
     if motivo_config:
         render_datajud_config_pendente_notice(motivo_config)
     else:
-        render_datajud_indisponivel_notice()
+        render_datajud_indisponivel_notice(datajud_result.get("_mock_motivo"))
 
 
 def _render_dje_dialog_notices(numero_processo: str) -> None:
     """Mostra os avisos de dados ilustrativos (DJEN e/ou DataJud) para o diálogo de histórico do Painel Geral."""
-    if (st.session_state.djen_results.get(numero_processo) or {}).get("_mock"):
-        render_djen_indisponivel_notice()
+    notice = _djen_notice_for(st.session_state.djen_results.get(numero_processo))
+    if notice:
+        notice()
     _render_datajud_notice_for(st.session_state.datajud_results.get(numero_processo))
 
 
 def _gerar_datajud_result_exemplo(
-    numero_processo: str, quantidade: int = 5, motivo_config: Optional[str] = None
+    numero_processo: str, quantidade: int = 5, motivo_config: Optional[str] = None, motivo: Optional[str] = None
 ) -> dict:
     """Movimentações e dados de capa ilustrativos no formato do DataJud, usados quando a API real não pôde
     ser consultada — seja por falha de rede/hospedagem (motivo_config=None) seja por um problema de
@@ -1836,6 +1833,7 @@ def _gerar_datajud_result_exemplo(
         "movements": movimentos,
         "_mock": True,
         "_mock_motivo_config": motivo_config,
+        "_mock_motivo": motivo,
     }
 
 
@@ -1845,8 +1843,8 @@ def _fetch_dje_processo_dados(parsed: NumeroProcessoCNJ) -> dict:
     dados: dict = {"djen_response": None, "datajud_result": None, "erros": []}
     try:
         dados["djen_response"] = ComunicaClient().buscar_todos(numero_processo=process_number)
-    except ComunicaError:
-        dados["djen_response"] = _gerar_djen_response_exemplo(numero_processo=process_number)
+    except ComunicaError as exc:
+        dados["djen_response"] = _gerar_djen_response_exemplo(numero_processo=process_number, motivo=exc.motivo)
     try:
         client = DataJudClient()
         response = client.buscar_por_numero_processo(parsed)
@@ -1856,8 +1854,8 @@ def _fetch_dje_processo_dados(parsed: NumeroProcessoCNJ) -> dict:
         dados["datajud_result"] = {"response": response, "source": source, "movements": movements}
     except DataJudConfigError as exc:
         dados["datajud_result"] = _gerar_datajud_result_exemplo(process_number, motivo_config=str(exc))
-    except DataJudError:
-        dados["datajud_result"] = _gerar_datajud_result_exemplo(process_number)
+    except DataJudError as exc:
+        dados["datajud_result"] = _gerar_datajud_result_exemplo(process_number, motivo=exc.motivo)
     return dados
 
 
@@ -1908,7 +1906,7 @@ DJEN_PROCESSOS_EXEMPLO_CNPJ = [
 ]
 
 
-def _gerar_djen_response_exemplo_cnpj(quantidade: int = 3) -> dict:
+def _gerar_djen_response_exemplo_cnpj(quantidade: int = 3, motivo: Optional[str] = None) -> dict:
     """Como `_gerar_djen_response_exemplo`, mas com um processo fictício diferente por item —
     a busca por CNPJ/razão social costuma reunir publicações de mais de um processo."""
     hoje = date.today()
@@ -1927,7 +1925,7 @@ def _gerar_djen_response_exemplo_cnpj(quantidade: int = 3) -> dict:
                 "numero_processo": numero,
             }
         )
-    return {"items": itens, "count": len(itens), "_mock": True}
+    return {"items": itens, "count": len(itens), "_mock": True, "_mock_motivo": motivo}
 
 
 def _fetch_dje_cnpj_dados(cnpj_item: dict) -> dict:
@@ -1935,8 +1933,8 @@ def _fetch_dje_cnpj_dados(cnpj_item: dict) -> dict:
     dados: dict = {"djen_response": None, "erro": None}
     try:
         dados["djen_response"] = ComunicaClient().buscar_todos(nome_parte=cnpj_item["label"])
-    except ComunicaError:
-        dados["djen_response"] = _gerar_djen_response_exemplo_cnpj()
+    except ComunicaError as exc:
+        dados["djen_response"] = _gerar_djen_response_exemplo_cnpj(motivo=exc.motivo)
     return dados
 
 
@@ -3553,9 +3551,7 @@ elif module == "Painel Geral":
                         },
                         default_source="Diário (DJEN)",
                         unavailable_sources={"Movimentações (DJe)": DJE_CNPJ_NOT_IMPLEMENTED_MSG},
-                        notice=render_djen_indisponivel_notice
-                        if (st.session_state.djen_cnpj_results.get(item["cnpj"]) or {}).get("_mock")
-                        else None,
+                        notice=_djen_notice_for(st.session_state.djen_cnpj_results.get(item["cnpj"])),
                     )
 
 elif module == "Monitoramento":
@@ -3633,8 +3629,8 @@ elif module == "Monitoramento":
                     last_query_label = last_query.strftime("%d/%m/%Y %H:%M") if last_query else "—"
                     card("ÚLTIMA CONSULTA", last_query_label, "data e hora")
 
-                if djen_response and djen_response.get("_mock"):
-                    render_djen_indisponivel_notice()
+                if notice := _djen_notice_for(djen_response):
+                    notice()
                 _render_datajud_notice_for(datajud_result)
 
                 if datajud_result:
@@ -3722,8 +3718,8 @@ elif module == "Monitoramento":
                     last_cnpj_query_label = last_cnpj_query.strftime("%d/%m/%Y %H:%M") if last_cnpj_query else "—"
                     card("ÚLTIMA CONSULTA", last_cnpj_query_label, "data e hora")
 
-                if djen_cnpj_response and djen_cnpj_response.get("_mock"):
-                    render_djen_indisponivel_notice()
+                if notice := _djen_notice_for(djen_cnpj_response):
+                    notice()
 
                 if cnpj_djen_rows_all:
                     cnpj_timeline_source = st.segmented_control(

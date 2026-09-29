@@ -26,6 +26,7 @@ from typing import Any, Optional
 
 import requests
 
+from comunica_client import motivo_falha
 from datajud_aliases import ALIAS_DATAJUD
 
 DATAJUD_BASE_URL = "https://api-publica.datajud.cnj.jus.br"
@@ -122,7 +123,12 @@ class NumeroProcessoCNJ:
 # ---------------------------------------------------------------------------
 
 class DataJudError(RuntimeError):
-    pass
+    """Erro de rede ou resposta da API. `motivo` traz uma descrição curta do tipo de falha,
+    própria para exibir ao usuário."""
+
+    def __init__(self, message: str, motivo: Optional[str] = None):
+        super().__init__(message)
+        self.motivo = motivo or message
 
 
 class DataJudConfigError(DataJudError):
@@ -181,10 +187,13 @@ class DataJudClient:
                 url, headers=self._headers(), data=json.dumps(body), timeout=REQUEST_TIMEOUT_SECONDS
             )
         except requests.RequestException as exc:
-            raise DataJudError(f"Falha de conexão com o DataJud para {numero.bruto}: {exc}") from exc
+            raise DataJudError(
+                f"Falha de conexão com o DataJud para {numero.bruto}: {exc}", motivo=motivo_falha(exc=exc)
+            ) from exc
         if resp.status_code != 200:
             raise DataJudError(
-                f"DataJud retornou {resp.status_code} para {numero.bruto}: {resp.text[:300]}"
+                f"DataJud retornou {resp.status_code} para {numero.bruto}: {resp.text[:300]}",
+                motivo=motivo_falha(status=resp.status_code),
             )
         return resp.json()
 

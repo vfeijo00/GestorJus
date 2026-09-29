@@ -16,8 +16,31 @@ ITENS_POR_PAGINA_MAXIMO = 1000
 PAGINAS_MAXIMAS = 20  # trava de segurança: no máximo 20 000 itens por consulta
 
 
+def motivo_falha(exc: Optional[BaseException] = None, status: Optional[int] = None) -> str:
+    """Descrição curta do tipo de falha de leitura de uma API, para exibir ao usuário."""
+    if status is not None:
+        if status == 429:
+            return "limite de requisições excedido (erro 429)"
+        if status in (401, 403):
+            return f"acesso negado (erro {status}) — chave inválida ou IP bloqueado"
+        if status >= 500:
+            return f"erro no servidor da API (erro {status})"
+        return f"a API recusou a consulta (erro {status})"
+    if isinstance(exc, requests.Timeout):
+        return "tempo de resposta esgotado"
+    if isinstance(exc, requests.ConnectionError):
+        return "falha de conexão com a API"
+    return "resposta inesperada da API"
+
+
 class ComunicaError(RuntimeError):
-    """Erro de comunicação ou resposta inválida da API Comunica."""
+    """Erro de comunicação ou resposta inválida da API Comunica.
+
+    `motivo` traz uma descrição curta do tipo de falha, própria para exibir ao usuário."""
+
+    def __init__(self, message: str, motivo: Optional[str] = None):
+        super().__init__(message)
+        self.motivo = motivo or message
 
 
 class ComunicaClient:
@@ -85,20 +108,27 @@ class ComunicaClient:
                 timeout=REQUEST_TIMEOUT_SECONDS,
             )
         except requests.RequestException as exc:
-            raise ComunicaError(f"Falha de conexão com a API Comunica: {exc}") from exc
+            raise ComunicaError(
+                f"Falha de conexão com a API Comunica: {exc}", motivo=motivo_falha(exc=exc)
+            ) from exc
 
         if resposta.status_code != 200:
             raise ComunicaError(
-                f"API Comunica retornou {resposta.status_code}: {resposta.text[:500]}"
+                f"API Comunica retornou {resposta.status_code}: {resposta.text[:500]}",
+                motivo=motivo_falha(status=resposta.status_code),
             )
 
         try:
             dados = resposta.json()
         except ValueError as exc:
-            raise ComunicaError("API Comunica retornou conteúdo que não é JSON") from exc
+            raise ComunicaError(
+                "API Comunica retornou conteúdo que não é JSON", motivo=motivo_falha()
+            ) from exc
 
         if not isinstance(dados, dict) or not isinstance(dados.get("items", []), list):
-            raise ComunicaError("Resposta da API Comunica não possui o formato esperado")
+            raise ComunicaError(
+                "Resposta da API Comunica não possui o formato esperado", motivo=motivo_falha()
+            )
         return dados
 
     def buscar_todos(self, **kwargs: Any) -> dict[str, Any]:
